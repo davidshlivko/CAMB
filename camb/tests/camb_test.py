@@ -194,6 +194,8 @@ class CambTest(unittest.TestCase):
                 "w",
                 "omch2",
                 "max_zrei",
+                "pade_eps0",
+                "pade_lneta0",
                 "wde_a_array",
                 "wde_w_array",
             },

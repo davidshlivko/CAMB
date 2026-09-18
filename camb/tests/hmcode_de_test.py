@@ -21,9 +21,7 @@ class HMcodeDarkEnergyTest(unittest.TestCase):
         pars.set_cosmology(H0=67.5, ombh2=0.02237, omch2=0.12, mnu=0.06)
         pars.InitPower.set_params(As=2.1e-9, ns=0.965)
         if tabulated:
-            a = np.linspace(0.05, 1.0, 80)
-            w = -1.0 + 0.25 * np.sin(np.pi * (1.0 - a) / 0.95) ** 2
-            pars.set_dark_energy_w_a(a, w, dark_energy_model="ppf")
+            pars.set_dark_energy(pade_eps0=0.3, pade_lneta0=2.0, dark_energy_model="ppf")
         else:
             pars.set_dark_energy(w=-0.9, wa=0.2, dark_energy_model="ppf")
         pars.set_matter_power(redshifts=[0.5], kmax=2.0, k_per_logint=10)

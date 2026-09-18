@@ -868,9 +868,11 @@ class CAMBparams(F2003Class):
         wde_a_array=None,
         wde_w_array=None,
         dark_energy_model="fluid",
+        pade_eps0=None,
+        pade_lneta0=None,
     ):
         r"""
-        Set dark energy parameters (use set_dark_energy_w_a to set w(a) from numerical table instead)
+        Set CPL, Padé-w, or explicitly tabulated dark-energy parameters.
         To use a custom dark energy model, assign the class instance to the DarkEnergy field instead.
 
         :param w: :math:`w\equiv p_{\rm de}/\rho_{\rm de}`, assumed constant
@@ -880,12 +882,21 @@ class CAMBparams(F2003Class):
         :param wde_a_array: array of scale factors
         :param wde_w_array: array of w(a)
         :param dark_energy_model: model to use ('fluid' or 'ppf'), default is 'fluid'
+        :param pade_eps0: Padé-w present-day departure parameter. Must be supplied with pade_lneta0.
+        :param pade_lneta0: Natural logarithm of the Padé-w evolution parameter. Must be supplied with pade_eps0.
         :return: self
         """
 
         de = self.make_class_named(dark_energy_model, DarkEnergyEqnOfState)
         de.set_params(
-            w=w, wa=wa, cs2=cs2, use_tabulated_w=use_tabulated_w, wde_a_array=wde_a_array, wde_w_array=wde_w_array
+            w=w,
+            wa=wa,
+            cs2=cs2,
+            use_tabulated_w=use_tabulated_w,
+            wde_a_array=wde_a_array,
+            wde_w_array=wde_w_array,
+            pade_eps0=pade_eps0,
+            pade_lneta0=pade_lneta0,
         )
         self.DarkEnergy = de
         return self

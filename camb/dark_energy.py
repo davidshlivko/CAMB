@@ -12,6 +12,36 @@ from .baseconfig import (
 )
 
 
+_PADE_W_TABLE_POINTS = 500
+_PADE_W_A_MIN = 1e-3
+
+
+def _pade_w_table(pade_eps0, pade_lneta0):
+    """Return the reference Padé-w scale-factor grid and equation-of-state table."""
+    try:
+        pade_eps0 = float(pade_eps0)
+        pade_lneta0 = float(pade_lneta0)
+    except (TypeError, ValueError) as exc:
+        raise CAMBValueError("pade_eps0 and pade_lneta0 must be finite real numbers") from exc
+
+    if not np.isfinite(pade_eps0) or not np.isfinite(pade_lneta0):
+        raise CAMBValueError("pade_eps0 and pade_lneta0 must be finite real numbers")
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        eta0 = np.exp(pade_lneta0)
+    if not np.isfinite(eta0):
+        raise CAMBValueError("exp(pade_lneta0) must be finite")
+
+    a = np.flip(1.001 - np.logspace(-3, 0, _PADE_W_TABLE_POINTS))
+    a[0] = _PADE_W_A_MIN
+    a[-1] = 1.0
+    with np.errstate(over="ignore", invalid="ignore"):
+        w = -1.0 + 2.0 * pade_eps0 / (3.0 + eta0 * (a**-3 - 1.0))
+    if not np.all(np.isfinite(w)):
+        raise CAMBValueError("Padé-w parameters produced non-finite w(a) values")
+    return a, w
+
+
 class DarkEnergyModel(F2003Class):
     """
     Abstract base class for dark energy model implementations.
@@ -47,9 +77,19 @@ class DarkEnergyEqnOfState(DarkEnergyModel):
 
     _methods_ = (("SetWTable", [numpy_1d, numpy_1d, POINTER(c_int)]),)
 
-    def set_params(self, w=-1.0, wa=0, cs2=1.0, use_tabulated_w=False, wde_a_array=None, wde_w_array=None):
+    def set_params(
+        self,
+        w=-1.0,
+        wa=0,
+        cs2=1.0,
+        use_tabulated_w=False,
+        wde_a_array=None,
+        wde_w_array=None,
+        pade_eps0=None,
+        pade_lneta0=None,
+    ):
         """
-         Set the parameters so that P(a)/rho(a) = w(a) = w + (1-a)*wa
+        Set the dark-energy equation of state using CPL, an explicit table, or Padé-w.
 
         :param w: w(0)
         :param wa: -dw/da(0)
@@ -57,13 +97,29 @@ class DarkEnergyEqnOfState(DarkEnergyModel):
         :param use_tabulated_w: whether use interpolated w
         :param wde_a_array: array of scale factors
         :param wde_w_array: array of w(a)
+        :param pade_eps0: Padé-w present-day departure parameter. Must be supplied with pade_lneta0.
+        :param pade_lneta0: Natural logarithm of the Padé-w evolution parameter. Must be supplied with pade_eps0.
+
+        Padé-w is represented by a spline table and therefore has the same INI serialization and pickling
+        restrictions as an explicitly tabulated equation of state.
         """
-        self.use_tabulated_w = use_tabulated_w
-        if self.use_tabulated_w:
+        use_pade = pade_eps0 is not None or pade_lneta0 is not None
+        if use_pade:
+            if pade_eps0 is None or pade_lneta0 is None:
+                raise CAMBValueError("Padé-w requires both pade_eps0 and pade_lneta0")
+            if w != -1.0 or wa != 0:
+                raise CAMBValueError("cannot combine Padé-w parameters with CPL w or wa")
+            if use_tabulated_w or wde_a_array is not None or wde_w_array is not None:
+                raise CAMBValueError("cannot combine Padé-w parameters with an explicit w(a) table")
+            a, pade_w = _pade_w_table(pade_eps0, pade_lneta0)
+            self.set_w_a_table(a, pade_w)
+        elif use_tabulated_w:
+            self.use_tabulated_w = True
             if w != -1.0 or wa != 0:
                 raise ValueError("cannot use w, wa as well as use_tabulated_w")
             self.set_w_a_table(wde_a_array, wde_w_array)
         else:
+            self.use_tabulated_w = False
             self.w = w
             self.wa = wa
         self.cs2 = cs2
