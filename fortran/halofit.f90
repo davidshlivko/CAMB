@@ -70,6 +70,7 @@
     integer, parameter :: halofit_casarini = 7
     integer, parameter :: halofit_mead2016 = 5, halofit_halomodel = 6, halofit_mead2015 = 8, halofit_mead2020 = 9
     integer, parameter :: halofit_mead2020_feedback = 10
+    integer, parameter :: halofit_mead2020_de = 11, halofit_mead2020_feedback_de = 12
     integer, parameter :: halofit_mead = halofit_mead2016 ! AM Kept for backwards compatibility
     integer, parameter :: halofit_default = halofit_mead2020
 
@@ -140,7 +141,7 @@
     public THalofit, HM_verbose
     public halofit_default, halofit_original, halofit_bird, halofit_peacock, halofit_takahashi
     public halofit_mead2016, halofit_mead2015, halofit_mead2020, halofit_halomodel, halofit_casarini
-    public halofit_mead2020_feedback
+    public halofit_mead2020_feedback, halofit_mead2020_de, halofit_mead2020_feedback_de
     public halofit_mead ! AM for backwards compatibility
 
     type HM_cosmology
@@ -157,6 +158,7 @@
         real(dl) :: grow_z, this_z ! cached growth factor at redshift being calculated
         logical :: wiggle_once = .false. ! extract the BAO wiggle once, at z=0
         logical :: wiggle_each_z = .false. ! extract the BAO wiggle separately at each redshift
+        logical :: use_camb_de = .false. ! use the active CAMB dark-energy background instead of effective w0-wa
         ! AM - Added feedback parameters below at fixed fiducial (DMONLY) values
         real(dl) :: A_baryon = 3.13
         real(dl) :: eta_baryon = 0.603
@@ -243,6 +245,28 @@
 
     contains
 
+    logical function is_mead2020(version)
+    integer, intent(in) :: version
+
+    is_mead2020 = version == halofit_mead2020 .or. version == halofit_mead2020_de
+
+    end function is_mead2020
+
+    logical function is_mead2020_feedback(version)
+    integer, intent(in) :: version
+
+    is_mead2020_feedback = version == halofit_mead2020_feedback .or. &
+        version == halofit_mead2020_feedback_de
+
+    end function is_mead2020_feedback
+
+    logical function uses_camb_de(version)
+    integer, intent(in) :: version
+
+    uses_camb_de = version == halofit_mead2020_de .or. version == halofit_mead2020_feedback_de
+
+    end function uses_camb_de
+
     function THalofit_PythonClass()
     character(len=:), allocatable :: THalofit_PythonClass
 
@@ -270,7 +294,7 @@
     if (this%halofit_version == halofit_mead2015 .or. this%halofit_version == halofit_mead2016) then
         this%HMcode_A_baryon = Ini%Read_Double('HMcode_A_baryon', 3.13_dl)
         this%HMcode_eta_baryon = Ini%Read_Double('HMcode_eta_baryon', 0.603_dl)
-    else if (this%halofit_version == halofit_mead2020_feedback) then
+    else if (is_mead2020_feedback(this%halofit_version)) then
         this%HMcode_logT_AGN = Ini%Read_Double('HMcode_logT_AGN', 7.8_dl)
     end if
     this%HMcode_wiggle_max_fnu = Ini%Read_Double('HMcode_wiggle_max_fnu', this%HMcode_wiggle_max_fnu)
@@ -304,8 +328,8 @@
             if (this%halofit_version == halofit_mead2016 .or. &
                 this%halofit_version == halofit_halomodel .or. &
                 this%halofit_version == halofit_mead2015 .or. &
-                this%halofit_version == halofit_mead2020 .or. &
-                this%halofit_version == halofit_mead2020_feedback) then
+                is_mead2020(this%halofit_version) .or. &
+                is_mead2020_feedback(this%halofit_version)) then
                 call this%HMcode(State, CAMB_Pk)
             else
 
@@ -623,10 +647,10 @@
     if (this%halofit_version == halofit_halomodel) imead_base = 0
     if (this%halofit_version == halofit_mead2016) imead_base = 1
     if (this%halofit_version == halofit_mead2015) imead_base = 2
-    if (this%halofit_version == halofit_mead2020) imead_base = 3
+    if (is_mead2020(this%halofit_version)) imead_base = 3
 
     ! The 2020 feedback model is a response: HMcode 2020, then the denominator and numerator
-    if (this%halofit_version == halofit_mead2020_feedback) then
+    if (is_mead2020_feedback(this%halofit_version)) then
         npass = 3
         imead_pass = [3, 4, 5]
     else
@@ -650,7 +674,7 @@
     kh = exp(CAMB_Pk%log_kh)
 
     ! Fill growth function table (only needs to be done once)
-    call fill_growtab(cosi)
+    call fill_growtab(cosi, State)
 
     if (cosi%wiggle_once) then
         ! Extract the BAO wiggle from the available spectrum nearest z=0. The
@@ -665,20 +689,22 @@
     ! small parallel regions used to set each one up, so this is the outermost parallel region:
     ! each thread takes its own copy of the cosmology (intrinsic assignment deep-copies the
     ! interpolation tables) and its own look-up tables. The regions inside then run serially
-    ! (see HM_par_inner). For a single redshift it is faster not to open the region at all.
-    if (nz > 1 .and. .not. HM_verbose) then
+    ! (see HM_par_inner). For a single redshift it is faster not to open the region at all. The
+    ! active dark-energy object may contain mutable interpolation state, so exact-DE modes keep
+    ! the redshift loop serial; their k loops can still run in parallel after the background setup.
+    if (nz > 1 .and. .not. HM_verbose .and. .not. cosi%use_camb_de) then
         !$OMP PARALLEL DEFAULT(SHARED), PRIVATE(cosm, lut, j)
         cosm = cosi
         !$OMP DO SCHEDULE(DYNAMIC)
         do j = 1, nz
-            call HMcode_redshift(this, CAMB_Pk, j, npass, imead_pass, kh, cosm, lut)
+            call HMcode_redshift(this, State, CAMB_Pk, j, npass, imead_pass, kh, cosm, lut)
         end do
         !$OMP END DO
         !$OMP END PARALLEL
     else
         cosm = cosi
         do j = 1, nz
-            call HMcode_redshift(this, CAMB_Pk, j, npass, imead_pass, kh, cosm, lut)
+            call HMcode_redshift(this, State, CAMB_Pk, j, npass, imead_pass, kh, cosm, lut)
             ! Only report the halo-model set-up for the first redshift
             HM_verbose = .false.
         end do
@@ -686,10 +712,11 @@
 
     end subroutine HMcode
 
-    subroutine HMcode_redshift(this, CAMB_Pk, j, npass, imead_pass, kh, cosm, lut)
+    subroutine HMcode_redshift(this, State, CAMB_Pk, j, npass, imead_pass, kh, cosm, lut)
     ! Everything HMcode does for one redshift; cosm and lut are the caller's working space, so
     ! this can be called either serially or from a thread with its own private copies of them
     class(THalofit) :: this
+    class(CAMBdata) :: State
     type(MatterPowerData) :: CAMB_Pk
     integer, intent(in) :: j, npass, imead_pass(:)
     real(dl), intent(in) :: kh(:)
@@ -725,7 +752,7 @@
         ! Initialisation for the halomodel calculation (needs to be done for each z).
         ! imead = 3,4,5 share everything except the halo concentration amplitude, so only the
         ! first pass of the feedback response model does the expensive set-up.
-        call this%halomod_init(imead, z, lut, cosm, reuse=ii > 1)
+        call this%halomod_init(imead, z, lut, cosm, State, reuse=ii > 1)
         if (global_error_flag /= 0) return
 
         ! Loop over k values and calculate P(k)
@@ -752,40 +779,42 @@
 
     end subroutine HMcode_redshift
 
-    function Delta_v(z, lut, cosm)
+    function Delta_v(z, lut, cosm, State)
     ! Function for the virialised overdensity
     real(dl) :: Delta_v
     real(dl), intent(in) :: z
     type(HM_cosmology), intent(in) :: cosm
     type(HM_tables), intent(in) :: lut
+    class(CAMBdata) :: State
 
     if (lut%imead == 1 .or. lut%imead == 2) then
         ! Mead et al. (2015; arXiv 1505.07833) value
-        Delta_v = 418*Omega_m_hm(z, cosm)**(-0.352_dl)
+        Delta_v = 418*Omega_m_hm(z, cosm, State)**(-0.352_dl)
         ! Mead et al. (2016; arXiv 1602.02154) neutrino addition
         if (lut%imead == 1) Delta_v = Delta_v*(1 + 0.916_dl*cosm%f_nu)
     else if (lut%imead == 0 .or. lut%imead == 3 .or. lut%imead == 4 .or. lut%imead == 5) then
-        Delta_v = Dv_Mead(z, cosm)
+        Delta_v = Dv_Mead(z, cosm, State)
     end if
 
     end function Delta_v
 
-    function delta_c(z, lut, cosm)
+    function delta_c(z, lut, cosm, State)
     ! Function for the linear collapse density
     real(dl) :: delta_c
     real(dl), intent(in) :: z
     type(HM_cosmology), intent(in) :: cosm
     type(HM_tables), intent(in) :: lut
+    class(CAMBdata) :: State
 
     if (lut%imead == 1 .or. lut%imead == 2) then
         ! Mead et al. (2015; arXiv 1505.07833) value
         delta_c = 1.59 + 0.0314*log(lut%sig8z)
         if (lut%imead == 1) then
             delta_c = delta_c*(1. + 0.262*cosm%f_nu) ! Mead et al. (2016; arXiv 1602.02154) neutrino addition
-            delta_c = delta_c*(1. + 0.0123*log10(Omega_m_hm(z, cosm))) ! Nakamura & Suto (1997) fitting formula for LCDM
+            delta_c = delta_c*(1. + 0.0123*log10(Omega_m_hm(z, cosm, State))) ! Nakamura & Suto (1997) LCDM fit
         end if
     else if (lut%imead == 0 .or. lut%imead == 3 .or. lut%imead == 4 .or. lut%imead == 5) then
-        delta_c = dc_Mead(z, cosm)
+        delta_c = dc_Mead(z, cosm, State)
     end if
 
     end function delta_c
@@ -1122,6 +1151,7 @@
         cosm%om_nu = CP%omnuh2/h2
         cosm%om_v = State%Omega_de
         call CP%DarkEnergy%Effective_w_wa(cosm%w, cosm%wa)
+        cosm%use_camb_de = uses_camb_de(this%halofit_version)
         cosm%f_nu = cosm%om_nu/cosm%om_m
         cosm%h = CP%H0/100
         cosm%Tcmb = CP%TCMB
@@ -1131,7 +1161,7 @@
         ! scaled to other redshifts by the scale-independent growth factor, so it only needs extracting
         ! once when growth is nearly scale-independent (small neutrino fraction) and the dark energy
         ! model does not itself introduce scale-dependent growth. Otherwise re-extract it at each redshift.
-        use_wiggle = this%halofit_version == halofit_mead2020 .or. this%halofit_version == halofit_mead2020_feedback
+        use_wiggle = is_mead2020(this%halofit_version) .or. is_mead2020_feedback(this%halofit_version)
         cosm%wiggle_once = use_wiggle .and. cosm%f_nu < this%HMcode_wiggle_max_fnu .and. &
             CP%DarkEnergy%assume_scale_indep_lowz_growth()
         cosm%wiggle_each_z = use_wiggle .and. .not. cosm%wiggle_once
@@ -1141,7 +1171,7 @@
     if (this%halofit_version == halofit_mead2015 .or. this%halofit_version == halofit_mead2016) then
         cosm%A_baryon = this%HMcode_A_baryon
         cosm%eta_baryon = this%HMcode_eta_baryon
-    else if (this%halofit_version == halofit_mead2020_feedback) then
+    else if (is_mead2020_feedback(this%halofit_version)) then
         cosm%logT_AGN = this%HMcode_logT_AGN
     end if
 
@@ -1153,6 +1183,7 @@
     if (HM_verbose) write(*, *) 'HM_cosmology: Om_v:', cosm%om_v
     if (HM_verbose) write(*, *) 'HM_cosmology: w_0:', cosm%w
     if (HM_verbose) write(*, *) 'HM_cosmology: w_a:', cosm%wa
+    if (HM_verbose) write(*, *) 'HM_cosmology: active CAMB DE background:', cosm%use_camb_de
     if (HM_verbose) write(*, *) 'HM_cosmology: f_nu:', cosm%f_nu
     if (HM_verbose) write(*, *) 'HM_cosmology: n_s:', cosm%ns
     if (HM_verbose) write(*, *) 'HM_cosmology: h:', cosm%h
@@ -1161,7 +1192,7 @@
     if (HM_verbose .and. (this%halofit_version == halofit_mead2015 .or. this%halofit_version == halofit_mead2016)) then
         write(*, *) 'HM_cosmology: A_baryon:', cosm%A_baryon
         write(*, *) 'HM_cosmology: eta_baryon:', cosm%eta_baryon
-    else if (HM_verbose .and. this%halofit_version == halofit_mead2020_feedback) then
+    else if (HM_verbose .and. is_mead2020_feedback(this%halofit_version)) then
         write(*, *) 'HM_cosmology: log10(T_AGN/K):', cosm%logT_AGN
     end if
     if (HM_verbose) write(*, *)
@@ -1215,8 +1246,9 @@
 
     end subroutine allocate_LUT
 
-    subroutine halomod_init(this, imead, z, lut, cosm, reuse)
+    subroutine halomod_init(this, imead, z, lut, cosm, State, reuse)
     class(THalofit) :: this
+    class(CAMBdata) :: State
     ! Halo-model initialisation routine
     ! Computes look-up HM_tables necessary for the halo model calculations
     integer, intent(in) :: imead
@@ -1234,7 +1266,7 @@
     lut%z = z
 
     if (.not. DefaultFalse(reuse)) then
-        call halomod_tables(this, z, lut, cosm)
+        call halomod_tables(this, z, lut, cosm, State)
         if (global_error_flag /= 0) return
     end if
 
@@ -1268,12 +1300,13 @@
     if (HM_verbose) write(*, *) 'HALOMOD: c max [Msun/h]:', lut%c(1)
     if (HM_verbose) write(*, *) 'HALOMOD: Done'
     if (HM_verbose) write(*, *)
-    if (HM_verbose) call this%write_parameters(z, lut, cosm)
+    if (HM_verbose) call this%write_parameters(z, lut, cosm, State)
 
     end subroutine halomod_init
 
-    subroutine halomod_tables(this, z, lut, cosm)
+    subroutine halomod_tables(this, z, lut, cosm, State)
     class(THalofit) :: this
+    class(CAMBdata) :: State
     ! Fills the look-up tables for the halo model at redshift z that do not depend on the
     ! halo concentration amplitude (see halomod_init)
     real(dl), intent(in) :: z
@@ -1312,7 +1345,7 @@
     if (HM_verbose) write(*, *) 'HALOMOD: M_min [log10(Msun/h)]:', log10(mmin)
     if (HM_verbose) write(*, *) 'HALOMOD: M_max [log10(Msun/h)]:', log10(mmax)
 
-    dc = this%delta_c(z, lut, cosm)
+    dc = this%delta_c(z, lut, cosm, State)
     lut%dc = dc
 
     !$OMP PARALLEL DO IF(HM_par_inner()), DEFAULT(SHARED), PRIVATE(m, r, sig, nu)
@@ -1346,7 +1379,7 @@
     if (HM_verbose) write(*, *) 'HALOMOD: m, r, nu, sig, sigf HM_tables filled'
 
     ! Fill virial radius table using real radius table
-    Dv = this%Delta_v(z, lut, cosm)
+    Dv = this%Delta_v(z, lut, cosm, State)
     lut%rv = lut%rr/(Dv**(1/3._dl))
 
     if (HM_verbose) write(*, *) 'HALOMOD: rv HM_tables filled'
@@ -1370,7 +1403,7 @@
     if (HM_verbose) write(*, *) 'HALOMOD: n_eff:', lut%neff
 
     ! Get the halo collapse redshifts and the Dolag (2004) dark-energy correction
-    call this%conc_bull(z, lut, cosm)
+    call this%conc_bull(z, lut, cosm, State)
 
     end subroutine halomod_tables
 
@@ -1399,8 +1432,9 @@
 
     end subroutine fill_conc
 
-    subroutine write_parameters(this, z, lut, cosm)
+    subroutine write_parameters(this, z, lut, cosm, State)
     class(THalofit) :: this
+    class(CAMBdata) :: State
     ! This subroutine writes out the halomodel parameters at the current redshift
     real(dl), intent(in) :: z
     type(HM_cosmology), intent(in) :: cosm
@@ -1409,8 +1443,8 @@
     if (HM_verbose) write(*, *) 'WRITE_PARAMETERS: at this redshift'
     if (HM_verbose) write(*, *) '=================================='
     if (HM_verbose) write(*, fmt='(A10,F10.5)') 'z:', z
-    if (HM_verbose) write(*, fmt='(A10,F10.5)') 'Dv:', this%Delta_v(z, lut, cosm)
-    if (HM_verbose) write(*, fmt='(A10,F10.5)') 'dc:', this%delta_c(z, lut, cosm)
+    if (HM_verbose) write(*, fmt='(A10,F10.5)') 'Dv:', this%Delta_v(z, lut, cosm, State)
+    if (HM_verbose) write(*, fmt='(A10,F10.5)') 'dc:', this%delta_c(z, lut, cosm, State)
     if (HM_verbose) write(*, fmt='(A10,F10.5)') 'eta:', this%eta(lut, cosm)
     if (HM_verbose) write(*, fmt='(A10,F10.5)') 'k*:', this%kstar(lut)
     if (HM_verbose) write(*, fmt='(A10,F10.5)') 'A:', this%As(lut, cosm)
@@ -1466,8 +1500,9 @@
 
     end function neff
 
-    subroutine conc_bull(this, z, lut, cosm)
+    subroutine conc_bull(this, z, lut, cosm, State)
     class(THalofit) :: this
+    class(CAMBdata) :: State
     ! Sets up the Bullock et al. (2001) concentration-mass relation: fills the collapse redshift
     ! table and caches the Dolag (2004) dark-energy corrections. The concentrations themselves are
     ! then filled by fill_conc, which is all that has to be redone if only the amplitude A changes.
@@ -1479,7 +1514,7 @@
     real(dl), parameter :: zinf = zc_Dolag
 
     ! Fill the collapse time look-up table
-    call this%zcoll_bull(z, cosm, lut)
+    call this%zcoll_bull(z, cosm, lut, State)
 
     lut%dolag_inf = 1
     lut%dolag_z = 1
@@ -1501,6 +1536,8 @@
         cosm_lcdm%w = -1.
         cosm_lcdm%wa = 0.
         cosm_lcdm%om_v = 1. - cosm%om_m ! Enforce flatness
+        ! Keep the matched reference model on its own analytic Lambda-CDM background.
+        cosm_lcdm%use_camb_de = .false.
 
         ! Needs to use grow_int explicitly here for LCDM model to avoid growth HM_tables
         ginf_lcdm = growint(zinf, cosm_lcdm)
@@ -1571,8 +1608,9 @@
 
     end function growint_integrand
 
-    subroutine zcoll_bull(this, z, cosm, lut)
+    subroutine zcoll_bull(this, z, cosm, lut, State)
     class(THalofit) :: this
+    class(CAMBdata) :: State
     ! Calculates the halo collapse redshift according to the Bullock (2001) prescription
     real(dl), intent(in) :: z
     type(HM_cosmology) :: cosm
@@ -1586,7 +1624,7 @@
     ! Needs to interpolate g(z) which should be pretty linear for a<0.05
     ! in 'g(a) vs a' space for all standard cosmologies
 
-    dc = this%delta_c(z, lut, cosm)
+    dc = this%delta_c(z, lut, cosm, State)
 
     ! Find the growth function at the current redshift
     growz = grow(z, cosm)
@@ -2312,73 +2350,99 @@
 
     end function gst
 
-    function Hubble2(z, cosm)
+    function Hubble2(z, cosm, State)
     ! This calculates the dimensionless squared hubble parameter at redshift z (H/H_0)^2!
     ! Ignores contributions from radiation (not accurate at high z, but consistent with simulations)!
     real(dl) :: Hubble2
     real(dl), intent(in) :: z
     type(HM_cosmology), intent(in) :: cosm
+    class(CAMBdata), optional :: State
 
-    Hubble2 = cosm%om_m*(1 + z)**3 + cosm%om_v*X_de(z, cosm) + (1 - cosm%om_m - cosm%om_v)*(1 + z)**2
+    Hubble2 = cosm%om_m*(1 + z)**3 + cosm%om_v*X_de(z, cosm, State) + &
+        (1 - cosm%om_m - cosm%om_v)*(1 + z)**2
 
     end function Hubble2
 
-    function AH(z, cosm)
+    function AH(z, cosm, State)
     ! The Hubble acceleration function \ddot{a}/a
     real(dl) :: AH
     real(dl), intent(in) :: z
     type(HM_cosmology), intent(in) :: cosm
+    class(CAMBdata), optional :: State
 
-    AH = cosm%om_m*(1 + z)**3 + cosm%om_v*(1. + 3.*w_de_hm(z, cosm))*X_de(z, cosm)
+    AH = cosm%om_m*(1 + z)**3 + cosm%om_v*(1. + 3.*w_de_hm(z, cosm, State))*X_de(z, cosm, State)
     AH = -AH/2.
 
     end function AH
 
-    function X_de(z, cosm)
+    function X_de(z, cosm, State)
     ! The time evolution for dark energy: rho_de=rho_de,0 * X(a)
     ! X(a) = 1 for LCDM but changes for other models
     real(dl) :: X_de
     real(dl), intent(in) :: z
     type(HM_cosmology), intent(in) :: cosm
-    real(dl) :: a
+    class(CAMBdata), optional :: State
+    real(dl) :: a, grhov_t
 
     a = 1./(1. + z)
-    X_de = (a**(-3*(1 + cosm%w + cosm%wa)))*exp(-3*cosm%wa*(1 - a))
+    if (cosm%use_camb_de) then
+        if (.not. present(State)) error stop 'X_DE: CAMBdata is required for the active dark-energy background'
+        if (State%grhov == 0._dl) then
+            X_de = 1._dl
+        else
+            call State%CP%DarkEnergy%BackgroundDensityAndPressure(State%grhov, a, grhov_t)
+            X_de = grhov_t/(State%grhov*a*a)
+        end if
+    else
+        X_de = (a**(-3*(1 + cosm%w + cosm%wa)))*exp(-3*cosm%wa*(1 - a))
+    end if
 
     end function X_de
 
-    function w_de_hm(z, cosm)
+    function w_de_hm(z, cosm, State)
 
     ! The dark energy w(a) function
     real(dl) :: w_de_hm
     real(dl), intent(in) :: z
     type(HM_cosmology), intent(in) :: cosm
-    real(dl) :: a
+    class(CAMBdata), optional :: State
+    real(dl) :: a, grhov_t
 
     a = 1./(1. + z)
-    w_de_hm = cosm%w + (1 - a)*cosm%wa
+    if (cosm%use_camb_de) then
+        if (.not. present(State)) error stop 'W_DE_HM: CAMBdata is required for the active dark-energy background'
+        if (State%grhov == 0._dl) then
+            w_de_hm = -1._dl
+        else
+            call State%CP%DarkEnergy%BackgroundDensityAndPressure(State%grhov, a, grhov_t, w_de_hm)
+        end if
+    else
+        w_de_hm = cosm%w + (1 - a)*cosm%wa
+    end if
 
     end function w_de_hm
 
-    function Omega_m_hm(z, cosm)
+    function Omega_m_hm(z, cosm, State)
     ! This calculates omega_m variations with z!
     real(dl) :: Omega_m_hm
     real(dl), intent(in) :: z
     real(dl) :: om_m
     type(HM_cosmology), intent(in) :: cosm
+    class(CAMBdata), optional :: State
 
     om_m = cosm%om_m
-    Omega_m_hm = (om_m*(1 + z)**3)/Hubble2(z, cosm)
+    Omega_m_hm = (om_m*(1 + z)**3)/Hubble2(z, cosm, State)
 
     end function Omega_m_hm
 
-    function Omega_cold_hm(z, cosm)
+    function Omega_cold_hm(z, cosm, State)
     ! This calculates omega_cold variations with z (no neutrinos)
     real(dl) :: Omega_cold_hm
     real(dl), intent(in) :: z
     type(HM_cosmology), intent(in) :: cosm
+    class(CAMBdata), optional :: State
 
-    Omega_cold_hm = ((cosm%om_c + cosm%om_b)*(1 + z)**3)/Hubble2(z, cosm)
+    Omega_cold_hm = ((cosm%om_c + cosm%om_b)*(1 + z)**3)/Hubble2(z, cosm, State)
 
     end function Omega_cold_hm
 
@@ -2714,9 +2778,10 @@
 
     end subroutine fit_cubic
 
-    subroutine fill_growtab(cosm)
+    subroutine fill_growtab(cosm, State)
     ! Fills a table of values of the scale-independent growth function
     type(HM_cosmology) :: cosm
+    class(CAMBdata) :: State
     integer :: i
     real(dl), parameter :: amin = amin_growth_interpolation
     real(dl), parameter :: amax = amax_growth_interpolation
@@ -2730,7 +2795,7 @@
     call ensure_table_size(cosm%growth, n)
 
     if (HM_verbose) write(*, *) 'GROWTH: Solving growth equation'
-    call solve_growth_ODE(cosm, cosm%a_growth, cosm%growth)
+    call solve_growth_ODE(cosm, cosm%a_growth, cosm%growth, State)
     if (HM_verbose) write(*, *) 'GROWTH: ODE done'
 
     ! Normalise so that g(z=0)=1
@@ -2755,11 +2820,12 @@
 
     end subroutine fill_growtab
 
-    subroutine solve_growth_ODE(cosm, a, d)
+    subroutine solve_growth_ODE(cosm, a, d, State)
     ! Solves the linear growth ODE for d(a) at the increasing output points a(:), by RK4 with
     ! nsub_growth_ODE steps per output interval. In matter domination d is proportional to a,
     ! which RK4 integrates exactly, so a fixed step in a is accurate even at early times.
     type(HM_cosmology), intent(in) :: cosm
+    class(CAMBdata) :: State
     real(dl), intent(in) :: a(:)
     real(dl), intent(out) :: d(:)
     real(dl) :: x, v, t, h, f
@@ -2769,14 +2835,14 @@
     ! AM Jul 19: changed initial conditions to be appropriate for massive neutrino cosmologies
     ! AM Sep 20: changed initial conditions to assume neutrinos cluster, but changed to take into account EDE
     t = aini_growth_ODE
-    f = 1. - Omega_m_hm(-1. + 1./t, cosm)
+    f = 1. - Omega_m_hm(-1. + 1./t, cosm, State)
     x = t**(1. - 3.*f/5.)
     v = (1. - 3.*f/5.)*t**(-3.*f/5.)
 
     do i = 1, size(a)
         h = (a(i) - t)/nsub_growth_ODE
         do j = 1, nsub_growth_ODE
-            call rk4_growth_step(x, v, t, h, cosm)
+            call rk4_growth_step(x, v, t, h, cosm, State)
         end do
         t = a(i) ! the accumulated t can differ in the last bits
         d(i) = x
@@ -2784,21 +2850,22 @@
 
     end subroutine solve_growth_ODE
 
-    subroutine rk4_growth_step(d, v, a, h, cosm)
+    subroutine rk4_growth_step(d, v, a, h, cosm, State)
     ! One 4th-order Runge-Kutta step of the growth ODE d''(a) = fv(d,d',a), with v = d'
     real(dl), intent(inout) :: d, v, a
     real(dl), intent(in) :: h
     type(HM_cosmology), intent(in) :: cosm
+    class(CAMBdata) :: State
     real(dl) :: kd1, kd2, kd3, kd4, kv1, kv2, kv3, kv4
 
     kd1 = h*v
-    kv1 = h*fv(d, v, a, cosm)
+    kv1 = h*fv(d, v, a, cosm, State)
     kd2 = h*(v + kv1/2)
-    kv2 = h*fv(d + kd1/2, v + kv1/2, a + h/2, cosm)
+    kv2 = h*fv(d + kd1/2, v + kv1/2, a + h/2, cosm, State)
     kd3 = h*(v + kv2/2)
-    kv3 = h*fv(d + kd2/2, v + kv2/2, a + h/2, cosm)
+    kv3 = h*fv(d + kd2/2, v + kv2/2, a + h/2, cosm, State)
     kd4 = h*(v + kv3)
-    kv4 = h*fv(d + kd3, v + kv3, a + h, cosm)
+    kv4 = h*fv(d + kd3, v + kv3, a + h, cosm, State)
 
     d = d + (kd1 + 2*kd2 + 2*kd3 + kd4)/6
     v = v + (kv1 + 2*kv2 + 2*kv3 + kv4)/6
@@ -2806,34 +2873,36 @@
 
     end subroutine rk4_growth_step
 
-    function fv(d, v, a, cosm)
+    function fv(d, v, a, cosm, State)
 
     ! d'' as a function of the growth d, its derivative v=d' and the scale factor
     real(dl) :: fv
     real(dl), intent(in) :: d, v, a
     real(dl) :: f1, f2, z, Om_m
     type(HM_cosmology), intent(in) :: cosm
+    class(CAMBdata) :: State
 
     z = -1. + (1./a)
 
     ! AM Jul 19: changed Omega_m to Omega_cold for massive neutrino cosmologies
     if (cold_growth) then
-        Om_m = Omega_cold_hm(z, cosm)
+        Om_m = Omega_cold_hm(z, cosm, State)
     else
-        Om_m = Omega_m_hm(z, cosm)
+        Om_m = Omega_m_hm(z, cosm, State)
     end if
     f1 = 3.*Om_m*d/(2.*a**2)
-    f2 = (2. + AH(z, cosm)/Hubble2(z, cosm))*(v/a)
+    f2 = (2. + AH(z, cosm, State)/Hubble2(z, cosm, State))*(v/a)
 
     fv = f1 - f2
 
     end function fv
 
-    subroutine Mead_growth_terms(z, cosm, x, y, Om_m)
+    subroutine Mead_growth_terms(z, cosm, x, y, Om_m, State)
 
     ! Growth terms shared by the Mead (2017; 1606.05345) delta_c and Delta_v fitting functions
     real(dl), intent(in) :: z
     type(HM_cosmology), intent(in) :: cosm
+    class(CAMBdata) :: State
     real(dl), intent(out) :: x, y, Om_m
     real(dl) :: a
 
@@ -2842,15 +2911,16 @@
     a = 1./(1. + z)
     x = ungrow(z, cosm)/a
     y = acc_growth(z, cosm)/a
-    Om_m = Omega_m_hm(z, cosm)
+    Om_m = Omega_m_hm(z, cosm, State)
 
     end subroutine Mead_growth_terms
 
-    real(dl) function dc_Mead(z, cosm)
+    real(dl) function dc_Mead(z, cosm, State)
 
     ! delta_c fitting function from Mead (2017; 1606.05345)
     real(dl), intent(in) :: z
     type(HM_cosmology), intent(in) :: cosm
+    class(CAMBdata) :: State
     real(dl) :: x, y, Om_m
 
     ! See Appendix A of Mead (2017) for naming convention
@@ -2866,7 +2936,7 @@
     ! a2 = 0 in the paper, so log10(Om_m)**a2 = 1 and is omitted below
     real(dl), parameter :: dc0 = (3./20.)*(12.*pi_HM)**(2./3.)
 
-    call Mead_growth_terms(z, cosm, x, y, Om_m)
+    call Mead_growth_terms(z, cosm, x, y, Om_m, State)
 
     dc_Mead = 1.
     dc_Mead = dc_Mead + f_Mead(x, y, p10, p11, p12, p13)*log10(Om_m)**a1
@@ -2875,11 +2945,12 @@
 
     end function dc_Mead
 
-    real(dl) function Dv_Mead(z, cosm)
+    real(dl) function Dv_Mead(z, cosm, State)
 
     ! Delta_v fitting function from Mead (2017; 1606.05345)
     real(dl), intent(in) :: z
     type(HM_cosmology), intent(in) :: cosm
+    class(CAMBdata) :: State
     real(dl) :: x, y, Om_m
 
     ! See Appendix A of Mead (2017) for naming convention
@@ -2895,7 +2966,7 @@
     integer, parameter :: a4 = 2
     real(dl), parameter :: Dv0 = 18.*pi_HM**2
 
-    call Mead_growth_terms(z, cosm, x, y, Om_m)
+    call Mead_growth_terms(z, cosm, x, y, Om_m, State)
 
     Dv_Mead = 1.
     Dv_Mead = Dv_Mead + f_Mead(x, y, p30, p31, p32, p33)*log10(Om_m)**a3

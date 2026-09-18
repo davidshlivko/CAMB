@@ -58,9 +58,11 @@ class SPkTest(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(pk)))
 
     def test_spk_rejects_mead2020_feedback_via_set_params(self):
-        model = SPkNonLinear()
-        with self.assertRaises(camb.CAMBValueError):
-            model.set_params(SPk_feedback=True, halofit_version="mead2020_feedback")
+        for version in ("mead2020_feedback", "mead2020_feedback_de"):
+            with self.subTest(version=version):
+                model = SPkNonLinear()
+                with self.assertRaises(camb.CAMBValueError):
+                    model.set_params(SPk_feedback=True, halofit_version=version)
 
     def test_spk_cobaya_friendly_set_params_signature(self):
         signature = inspect.signature(SPkNonLinear.set_params)
