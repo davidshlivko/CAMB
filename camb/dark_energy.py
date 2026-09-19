@@ -11,7 +11,6 @@ from .baseconfig import (
     numpy_1d,
 )
 
-
 _PADE_W_TABLE_POINTS = 500
 _PADE_W_A_MIN = 1e-3
 
