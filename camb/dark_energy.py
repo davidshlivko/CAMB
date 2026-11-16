@@ -272,5 +272,63 @@ class EarlyQuintessence(Quintessence):
             self.fde_zc = fde_zc
 
 
+@fortran_class
+class IDEExponential(DarkEnergyModel):
+    r"""Scalar field with exponential potential and coupled CDM mass.
+
+    The dimensionless field is :math:`\varphi=\phi/M_{\rm Pl}`,
+    :math:`V=V_0 e^{-\lambda\varphi}`, and
+    :math:`m_c=m_{c,\mathrm{early}}e^{-\beta\varphi}`. Baryons are uncoupled.
+    Set it through :meth:`camb.model.CAMBparams.set_ide_cosmology`. Background
+    and adiabatic scalar CMB calculations with RECFAST and linear lensing are
+    supported.
+    """
+
+    _fortran_class_module_ = "DarkEnergyIDEExponential"
+    _fortran_class_name_ = "TIDEExponential"
+    _fields_ = (
+        ("V0_over_rho100", c_double, "V0 / rho_crit,100"),
+        ("omc_early", c_double, "early CDM density normalization / rho_crit,100"),
+        ("beta", c_double, "exponential CDM mass coupling"),
+        ("lam", c_double, "exponential potential slope"),
+        ("a_init", c_double, "initial scale factor"),
+        ("integrate_tol", c_double, "relative tolerance of the forward field solve"),
+        ("history_points", c_int, "number of stored history samples"),
+    )
+
+    def set_params(
+        self,
+        *,
+        V0_over_rho100,
+        omc_early,
+        beta,
+        lam,
+        a_init=1e-10,
+        integrate_tol=1e-10,
+        history_points=2049,
+    ):
+        """Set potential, early CDM amplitude, coupling, and integration controls."""
+        vals = np.array([V0_over_rho100, omc_early, beta, lam, a_init, integrate_tol], dtype=np.float64)
+        if not np.all(np.isfinite(vals)):
+            raise CAMBValueError("IDE parameters must be finite")
+        if V0_over_rho100 <= 0 or omc_early <= 0:
+            raise CAMBValueError("IDE requires V0_over_rho100 > 0 and omc_early > 0")
+        if not 0 < a_init < 1 or integrate_tol <= 0:
+            raise CAMBValueError("IDE requires 0 < a_init < 1 and integrate_tol > 0")
+        if int(history_points) != history_points or history_points < 32:
+            raise CAMBValueError("IDE history_points must be an integer >= 32")
+        self.V0_over_rho100 = V0_over_rho100
+        self.omc_early = omc_early
+        self.beta = beta
+        self.lam = lam
+        self.a_init = a_init
+        self.integrate_tol = integrate_tol
+        self.history_points = int(history_points)
+        return self
+
+    def __getstate__(self):
+        raise TypeError("Cannot save IDE model with an initialized background history")
+
+
 # short names for models that support w/wa
 F2003Class._class_names.update({"fluid": DarkEnergyFluid, "ppf": DarkEnergyPPF})

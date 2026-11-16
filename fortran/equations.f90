@@ -44,7 +44,8 @@
     logical, parameter :: plot_evolve = .false. ! for outputting time evolution
 
     integer, parameter :: basic_num_eqns = 4
-    integer, parameter :: ix_etak = 1, ix_clxc = 2, ix_clxb = 3, ix_vb = 4 ! Scalar array indices for each quantity
+    integer, parameter :: ix_etak = 1, ix_clxc = 2, ix_clxb = 3, ix_vb = 4, ix_vc = 5
+    ! ix_vc is present only for IDE; ordinary scalar state arrays retain the original four-variable prefix.
     integer, parameter :: ixt_H = 1, ixt_shear = 2 ! tensor indices
 
     logical :: DoTensorNeutrinos = .true.
@@ -55,7 +56,7 @@
     ! Vector mode anisotropic stress in units of rho_gamma
     real(dl) :: vec_sig0 = 1._dl
     ! Vector mode shear
-    integer, parameter :: max_l_evolve = 256 ! Maximum l we are ever likely to propagate
+    integer, parameter :: max_l_evolve = 512 ! Supports high-accuracy low-q reionization hierarchies
     ! Note higher values increase size of Evolution vars, hence memory
 
     ! Supported scalar initial condition flags
@@ -67,6 +68,11 @@
         real(dl) q, q2
         real(dl) k_buf, k2_buf ! set in initial
         logical :: is_cosmological_constant
+        logical :: is_ide = .false.
+        real(dl) :: diagnostic_z = 0._dl
+        real(dl) :: diagnostic_dgq = 0._dl
+        real(dl) :: diagnostic_dgrho = 0._dl
+        real(dl) :: diagnostic_sigma = 0._dl
 
         integer w_ix ! Index of two quintessence equations
         integer Tg_ix ! index of matter temperature perturbation
@@ -308,7 +314,7 @@
         end do
     end if
 
-    if (CP%DoLateRadTruncation) then
+    if (CP%DoLateRadTruncation .and. .not. EV%is_ide) then
         if (.not. EV%no_nu_multpoles) & !!.and. .not. EV%has_nu_relativistic .and. tau_switch_nu_massless ==noSwitch)  &
             tau_switch_no_nu_multpoles = &
             max(15/EV%k_buf*switchBoost, &
@@ -592,10 +598,11 @@
     real(dl) nu_l_accuracy_boost
 
     neq = basic_num_eqns
+    if (EV%is_ide) neq = neq + 1
     maxeq = neq
     if (.not. EV%no_phot_multpoles) then
         ! Photon multipoles
-        EV%g_ix = basic_num_eqns + 1
+        EV%g_ix = neq + 1
         if (EV%TightCoupling) then
             neq = neq + 2
         else
@@ -709,7 +716,11 @@
     real(dl) q, pert_scale
 
     yout = 0
-    yout(1:basic_num_eqns) = y(1:basic_num_eqns)
+    if (EV%is_ide) then
+        yout(1:ix_vc) = y(1:ix_vc)
+    else
+        yout(1:basic_num_eqns) = y(1:basic_num_eqns)
+    end if
 
     ! DarkEnergy
     if (CP%DarkEnergy%num_perturb_equations > 0) &
@@ -922,6 +933,7 @@
 
     EV%high_ktau_neutrino_approx = .false.
     if (CP%WantScalars) then
+        EV%is_ide = CP%DarkEnergy%InitialScaleFactor() > 0._dl
         EV%TightCoupling = .true.
         EV%no_phot_multpoles = .false.
         EV%no_nu_multpoles = .false.
@@ -1018,7 +1030,15 @@
 
         EV%poltruncfac = real(EV%lmaxgpol, dl)/max(1, (EV%lmaxgpol - 2))
         EV%MaxlNeeded = max(EV%lmaxg, EV%lmaxnr, EV%lmaxgpol, EV%lmaxnu)
-        if (EV%MaxlNeeded > max_l_evolve) call MpiStop('Need to increase max_l_evolve')
+        if (EV%MaxlNeeded > max_l_evolve) then
+            if (EV%is_ide) then
+                call GlobalError('IDE scalar hierarchy exceeds max_l_evolve; reduce lAccuracyBoost', &
+                    error_unsupported_params)
+                EV%nvar = 0
+                return
+            end if
+            call MpiStop('Need to increase max_l_evolve')
+        end if
         call SetupScalarArrayIndices(EV, EV%nvar)
         if (State%closed) EV%nvar = EV%nvar + 1 ! so can reference lmax+1 with zero coefficient
         EV%lmaxt = 0
@@ -1897,7 +1917,7 @@
     real(dl) Rp15, tau, x, x2, x3, om, omtau, &
         Rc, Rb, Rv, Rg, grhonu, chi
     real(dl) k, k2
-    real(dl) a, a2, iqg, rhomass, a_massive, ep, nu_l_accuracy_boost
+    real(dl) a, a2, iqg, rhomass, a_massive, ep, nu_l_accuracy_boost, grhoc_early, a_init
     integer l, i, nu_i, j, ind
     integer, parameter :: i_clxg = 1, i_clxr = 2, i_clxc = 3, i_clxb = 4, &
         i_qg = 5, i_qr = 6, i_vb = 7, i_pir = 8, i_eta = 9, i_aj3r = 10, i_clxde = 11, i_vde = 12
@@ -1958,12 +1978,25 @@
     rhomass = sum(State%grhormass(1:CP%Nu_mass_eigenstates))
     grhonu = rhomass + State%grhornomass
 
-    om = (State%grhob + State%grhoc)/sqrt(3*(State%grhog + grhonu))
+    grhoc_early = State%grhoc
+    if (EV%is_ide) then
+        a_init = CP%DarkEnergy%InitialScaleFactor()
+        grhoc_early = CP%DarkEnergy%CDMGrhoa4(a_init, State%grhoc)/a_init
+        if (CP%Scalar_initial_condition /= initial_adiabatic) then
+            call GlobalError('IDE scalar evolution requires adiabatic initial conditions', error_unsupported_params)
+            return
+        end if
+    end if
+    om = (State%grhob + grhoc_early)/sqrt(3*(State%grhog + grhonu))
     omtau = om*tau
     Rv = grhonu/(grhonu + State%grhog)
 
     Rg = 1 - Rv
-    Rc = CP%omch2/(CP%omch2 + CP%ombh2)
+    if (EV%is_ide) then
+        Rc = grhoc_early/(grhoc_early + State%grhob)
+    else
+        Rc = CP%omch2/(CP%omch2 + CP%ombh2)
+    end if
     Rb = 1 - Rc
     Rp15 = 4*Rv + 15
 
@@ -1971,6 +2004,7 @@
         call MpiStop('Invalid initial condition for scalar modes')
 
     a = tau*State%adotrad*(1 + omtau/4)
+    if (EV%is_ide) a = a_init
     a2 = a*a
 
     initv = 0
@@ -2055,6 +2089,7 @@
 
     ! CDM
     y(ix_clxc) = initvec(i_clxc)
+    if (EV%is_ide) y(ix_vc) = 0._dl
 
     ! Baryons
     y(ix_clxb) = initvec(i_clxb)
@@ -2291,7 +2326,8 @@
     real(dl) w_dark_energy_t ! equation of state of dark energy
     real(dl) gpres_noDE ! Pressure with matter and radiation, no dark energy
     real(dl) qgdot, qrdot, pigdot, pirdot, vbdot, dgrho, adotoa
-    real(dl) a, a2, z, clxc, clxb, vb, clxg, qg, pig, clxr, qr, pir
+    real(dl) a, a2, z, clxc, clxb, vb, vc, clxg, qg, pig, clxr, qr, pir
+    real(dl) coupling_beta, scalar_phi, scalar_phidot
     real(dl) E2, dopacity
     integer l, i, ind, ind2, off_ix, ix
     real(dl) dgs, sigmadot, dz
@@ -2326,6 +2362,8 @@
 
     ! CDM variables
     clxc = ay(ix_clxc)
+    vc = 0._dl
+    if (EV%is_ide) vc = ay(ix_vc)
 
     ! Baryon variables
     clxb = ay(ix_clxb)
@@ -2334,6 +2372,7 @@
 
     grhob_t = State%grhob/a
     grhoc_t = State%grhoc/a
+    if (EV%is_ide) grhoc_t = State%CP%DarkEnergy%CDMGrhoa4(a, State%grhoc)/a2
     grhor_t = State%grhornomass/a2
     grhog_t = State%grhog/a2
 
@@ -2348,7 +2387,7 @@
     !  8*pi*a*a*SUM[rho_i*clx_i]
     dgrho_matter = grhob_t*clxb + grhoc_t*clxc
     ! 8*pi*a*a*SUM[(rho_i+p_i)*v_i]
-    dgq = grhob_t*vb
+    dgq = grhob_t*vb + grhoc_t*vc
 
     gpres_nu = 0
     grhonu_t = 0
@@ -2434,12 +2473,26 @@
         ayprime(ix_etak) = 0.5_dl*dgq + State%curv*z
     end if
 
+    EV%diagnostic_z = z
+    EV%diagnostic_dgq = dgq
+    EV%diagnostic_dgrho = dgrho
+    EV%diagnostic_sigma = sigma
+
     if (.not. EV%is_cosmological_constant) &
         call State%CP%DarkEnergy%PerturbationEvolve(ayprime, w_dark_energy_t, &
         EV%w_ix, a, adotoa, k, z, ay)
 
     ! CDM equation of motion
     clxcdot = -k*z
+    if (EV%is_ide) then
+        coupling_beta = State%CP%DarkEnergy%CouplingBeta()
+        call State%CP%DarkEnergy%ScalarBackgroundAtA(a, scalar_phi, scalar_phidot, adotoa)
+        clxcdot = clxcdot - k*vc - coupling_beta*ay(EV%w_ix + 1)
+        ayprime(ix_vc) = -(adotoa - coupling_beta*scalar_phidot)*vc &
+            - coupling_beta*k*ay(EV%w_ix)
+        ayprime(EV%w_ix + 1) = ayprime(EV%w_ix + 1) &
+            + State%CP%DarkEnergy%CoupledFieldSource(a, grhoc_t, clxc)
+    end if
     ayprime(ix_clxc) = clxcdot
 
     ! Baryon equation of motion.
@@ -2841,9 +2894,9 @@
             EV%OutputTransfer(Transfer_tot_de) = dgrho/grho_matter
             ! Transfer_Weyl is k^2Phi, where Phi is the Weyl potential
             EV%OutputTransfer(Transfer_Weyl) = k2*phi
-            EV%OutputTransfer(Transfer_Newt_vel_cdm) = -k*sigma/adotoa
+            EV%OutputTransfer(Transfer_Newt_vel_cdm) = -k*(vc + sigma)/adotoa
             EV%OutputTransfer(Transfer_Newt_vel_baryon) = -k*(vb + sigma)/adotoa
-            EV%OutputTransfer(Transfer_vel_baryon_cdm) = vb
+            EV%OutputTransfer(Transfer_vel_baryon_cdm) = vb - vc
             if (State%CP%Do21cm) then
                 Tspin = State%CP%Recomb%T_s(a)
                 xe = State%CP%Recomb%x_e(a)

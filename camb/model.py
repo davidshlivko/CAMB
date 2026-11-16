@@ -23,7 +23,7 @@ from .baseconfig import (
     numpy_1d,
     numpy_1d_int,
 )
-from .dark_energy import DarkEnergyEqnOfState, DarkEnergyModel
+from .dark_energy import DarkEnergyEqnOfState, DarkEnergyModel, IDEExponential
 from .initialpower import InitialPower, SplinedInitialPower
 from .nonlinear import NonLinearModel
 from .recombination import RecombinationModel
@@ -105,6 +105,13 @@ evolve_names = transfer_names + [
     "T_source",
     "E_source",
     "lens_potential_source",
+    "delta_phi_ide",
+    "delta_phi_prime_ide",
+    "v_cdm_synch_ide",
+    "z_synch_ide",
+    "dgq_ide",
+    "dgrho_ide",
+    "sigma_synch_ide",
 ]
 
 background_names = [
@@ -480,7 +487,7 @@ class CAMBparams(F2003Class):
         self.Accuracy.lSampleBoost = lSampleBoost
         self.Accuracy.AccuracyBoost = AccuracyBoost
         self.Accuracy.lAccuracyBoost = lAccuracyBoost
-        self.DoLateRadTruncation = DoLateRadTruncation
+        self.DoLateRadTruncation = DoLateRadTruncation and not isinstance(self.DarkEnergy, IDEExponential)
         if min_l_logl_sampling:
             self.min_l_logl_sampling = min_l_logl_sampling
         return self
@@ -723,7 +730,73 @@ class CAMBparams(F2003Class):
          a function(pars: CAMBParams, H0: float). Not normally needed, but can be used e.g. when DE model needs to be
          changed for each H0 because it depends explicitly on H0
         """
+        if isinstance(self.DarkEnergy, IDEExponential):
+            raise CAMBError("Use set_ide_cosmology to set IDE physical densities; H0 and omch2 are derived")
 
+        self._set_physical_cosmology(
+            ombh2=ombh2,
+            omch2=omch2,
+            omk=omk,
+            neutrino_hierarchy=neutrino_hierarchy,
+            num_massive_neutrinos=num_massive_neutrinos,
+            mnu=mnu,
+            omnuh2_active=omnuh2_active,
+            nnu=nnu,
+            YHe=YHe,
+            meffsterile=meffsterile,
+            standard_neutrino_neff=standard_neutrino_neff,
+            TCMB=TCMB,
+            Alens=Alens,
+            bbn_predictor=bbn_predictor,
+        )
+
+        if cosmomc_theta or thetastar:
+            if H0 is not None:
+                raise CAMBError("Set H0=None when setting theta.")
+            if cosmomc_theta and thetastar:
+                raise CAMBError("Cannot set both cosmomc_theta and thetastar")
+
+            self.set_H0_for_theta(
+                cosmomc_theta or thetastar,
+                cosmomc_approx=cosmomc_theta is not None,
+                theta_H0_range=theta_H0_range,
+                setter_H0=setter_H0,
+            )
+        else:
+            if H0 is None:
+                raise CAMBError("Must set H0, cosmomc_theta or thetastar")
+            if H0 < 1:
+                raise CAMBValueError("H0 is the value in km/s/Mpc, your value looks very small")
+            self.H0 = H0
+
+        if tau is not None:
+            if zrei is not None:
+                raise CAMBError("Cannot set both tau and zrei")
+            self.Reion.set_tau(tau)
+        elif zrei is not None:
+            self.Reion.set_zrei(zrei)
+
+        return self
+
+    def _set_physical_cosmology(
+        self,
+        *,
+        ombh2,
+        omch2,
+        omk,
+        neutrino_hierarchy,
+        num_massive_neutrinos,
+        mnu,
+        omnuh2_active,
+        nnu,
+        YHe,
+        meffsterile,
+        standard_neutrino_neff,
+        TCMB,
+        Alens,
+        bbn_predictor,
+    ):
+        """Set densities and neutrino masses without using H0."""
         if YHe is None:
             # use BBN prediction
             if isinstance(bbn_predictor, str):
@@ -765,32 +838,78 @@ class CAMBparams(F2003Class):
             byref(c_double(standard_neutrino_neff)),
         )
 
-        if cosmomc_theta or thetastar:
-            if H0 is not None:
-                raise CAMBError("Set H0=None when setting theta.")
-            if cosmomc_theta and thetastar:
-                raise CAMBError("Cannot set both cosmomc_theta and thetastar")
+    def set_ide_cosmology(
+        self,
+        *,
+        V0_over_rho100,
+        omc_early,
+        beta,
+        lam,
+        ombh2=0.022,
+        a_init=1e-10,
+        integrate_tol=1e-10,
+        history_points=2049,
+        neutrino_hierarchy="degenerate",
+        num_massive_neutrinos=1,
+        mnu=0.06,
+        omnuh2_active=None,
+        nnu=constants.default_nnu,
+        YHe=None,
+        meffsterile=0.0,
+        standard_neutrino_neff=constants.default_nnu,
+        TCMB=constants.COBE_CMBTemp,
+        tau=None,
+        zrei=None,
+        bbn_predictor=None,
+    ):
+        r"""Set a flat interacting dark-energy background using early CDM and potential amplitudes.
 
-            self.set_H0_for_theta(
-                cosmomc_theta or thetastar,
-                cosmomc_approx=cosmomc_theta is not None,
-                theta_H0_range=theta_H0_range,
-                setter_H0=setter_H0,
-            )
-        else:
-            if H0 is None:
-                raise CAMBError("Must set H0, cosmomc_theta or thetastar")
-            if H0 < 1:
-                raise CAMBValueError("H0 is the value in km/s/Mpc, your value looks very small")
-            self.H0 = H0
+        The coupled CDM density is
+        :math:`\rho_c(a)/\rho_{\mathrm{crit},100}=\omega_{c,\mathrm{early}}a^{-3}e^{-\beta\varphi(a)}`.
+        The dimensionless field starts at :math:`\varphi(a_i)=d\varphi/d\ln a(a_i)=0`.
+        The resolved ``H0`` and ``omch2`` are available from ``bg.Params`` after
+        ``bg = camb.get_background(pars, no_thermo=True)``. This input object keeps
+        unresolved placeholders for those two values.
 
+        Adiabatic scalar CMB calculations with linear lensing are supported. The
+        ``mnu`` and neutrino options have the same meaning as in :meth:`set_cosmology`.
+        """
+        self._set_physical_cosmology(
+            ombh2=ombh2,
+            omch2=np.nan,
+            omk=0.0,
+            neutrino_hierarchy=neutrino_hierarchy,
+            num_massive_neutrinos=num_massive_neutrinos,
+            mnu=mnu,
+            omnuh2_active=omnuh2_active,
+            nnu=nnu,
+            YHe=YHe,
+            meffsterile=meffsterile,
+            standard_neutrino_neff=standard_neutrino_neff,
+            TCMB=TCMB,
+            Alens=1.0,
+            bbn_predictor=bbn_predictor,
+        )
+        self.H0 = np.nan
+        self.DarkEnergy = IDEExponential().set_params(
+            V0_over_rho100=V0_over_rho100,
+            omc_early=omc_early,
+            beta=beta,
+            lam=lam,
+            a_init=a_init,
+            integrate_tol=integrate_tol,
+            history_points=history_points,
+        )
+        self.WantCls = True
+        self.WantTransfer = False
+        self.DoLateRadTruncation = False
+        self.NonLinear = NonLinear_none
         if tau is not None:
             if zrei is not None:
                 raise CAMBError("Cannot set both tau and zrei")
             self.Reion.set_tau(tau)
         elif zrei is not None:
             self.Reion.set_zrei(zrei)
-
         return self
 
     @property
@@ -1050,6 +1169,10 @@ class CAMBparams(F2003Class):
                           preserves current setting
         :return: self
         """
+        if isinstance(self.DarkEnergy, IDEExponential):
+            if nonlinear:
+                raise CAMBError("IDEExponential does not support nonlinear CMB lensing")
+            nonlinear = False
         self.lens_output_margin = lens_output_margin
         if self.DoLensing:
             self.max_l = lmax + lens_output_margin

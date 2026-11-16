@@ -11,6 +11,16 @@
         integer :: num_perturb_equations = 0
     contains
     procedure :: Init
+    procedure :: RequiresResolution
+    procedure :: ResolveBackground
+    procedure :: CDMGrhoa4
+    procedure :: PhiAtA
+    procedure :: InitialScaleFactor
+    procedure :: CouplingBeta
+    procedure :: ScalarBackgroundAtA
+    procedure :: CoupledFieldSource
+    procedure :: ExpansionLogSlope
+    procedure :: RhoCOverRho100
     procedure :: BackgroundDensityAndPressure
     procedure :: PerturbedStressEnergy ! Get density perturbation and heat flux for sources
     procedure :: diff_rhopi_Add_Term
@@ -81,6 +91,89 @@
     class(TCAMBdata), intent(in), target :: State
 
     end subroutine Init
+
+    logical function RequiresResolution(this)
+    class(TDarkEnergyModel), intent(in) :: this
+
+    RequiresResolution = .false.
+
+    end function RequiresResolution
+
+    subroutine ResolveBackground(this, State, H0, omch2)
+    use classes
+    class(TDarkEnergyModel), intent(inout) :: this
+    class(TCAMBdata), intent(in), target :: State
+    real(dl), intent(out) :: H0, omch2
+
+    H0 = 0._dl
+    omch2 = 0._dl
+
+    end subroutine ResolveBackground
+
+    real(dl) function CDMGrhoa4(this, a, grhoc0)
+    class(TDarkEnergyModel), intent(in) :: this
+    real(dl), intent(in) :: a, grhoc0
+
+    CDMGrhoa4 = grhoc0*a
+
+    end function CDMGrhoa4
+
+    real(dl) function PhiAtA(this, a)
+    class(TDarkEnergyModel), intent(in) :: this
+    real(dl), intent(in) :: a
+
+    PhiAtA = 0._dl
+
+    end function PhiAtA
+
+    real(dl) function InitialScaleFactor(this)
+    class(TDarkEnergyModel), intent(in) :: this
+
+    InitialScaleFactor = 0._dl
+
+    end function InitialScaleFactor
+
+    real(dl) function CouplingBeta(this)
+    class(TDarkEnergyModel), intent(in) :: this
+
+    CouplingBeta = 0._dl
+
+    end function CouplingBeta
+
+    subroutine ScalarBackgroundAtA(this, a, phi, phidot, adotoa)
+    class(TDarkEnergyModel), intent(in) :: this
+    real(dl), intent(in) :: a
+    real(dl), intent(out) :: phi, phidot
+    real(dl), intent(in), optional :: adotoa
+
+    phi = 0._dl
+    phidot = 0._dl
+
+    end subroutine ScalarBackgroundAtA
+
+    real(dl) function CoupledFieldSource(this, a, grhoc_t, delta_c)
+    class(TDarkEnergyModel), intent(in) :: this
+    real(dl), intent(in) :: a, grhoc_t, delta_c
+
+    CoupledFieldSource = 0._dl
+
+    end function CoupledFieldSource
+
+    real(dl) function ExpansionLogSlope(this, a)
+    class(TDarkEnergyModel), intent(in) :: this
+    real(dl), intent(in) :: a
+
+    ExpansionLogSlope = 0._dl
+
+    end function ExpansionLogSlope
+
+    real(dl) function RhoCOverRho100(this, a)
+    class(TDarkEnergyModel), intent(in) :: this
+    real(dl), intent(in) :: a
+
+    RhoCOverRho100 = 0._dl
+
+    end function RhoCOverRho100
 
     subroutine BackgroundDensityAndPressure(this, grhov, a, grhov_t, w)
     ! Get grhov_t = 8*pi*rho_de*a**2 and (optionally) equation of state at scale factor a
@@ -292,7 +385,7 @@
         if (this%w_lam + this%wa > 0) &
             error stop 'w + wa > 0, giving w>0 at high redshift'
     else
-        call file%LoadTxt(Ini%Read_String('wafile'), table)
+        call File%LoadTxt(Ini%Read_String('wafile'), table)
         call this%SetwTable(table(:, 1), table(:, 2), size(table(:, 1)))
     end if
 

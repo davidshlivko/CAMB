@@ -9,6 +9,7 @@ from . import constants, model, recombination
 from ._config import config
 from .baseconfig import CAMBError as CAMBError
 from .baseconfig import CAMBUnknownArgumentError, CAMBValueError, camblib, filepath_to_fortran, np
+from .dark_energy import IDEExponential
 from .model import CAMBparams
 from .results import CAMBdata
 from .results import ClTransferData as ClTransferData
@@ -71,6 +72,8 @@ def get_bispectrum(params, bispectrum_params=None, output_root=""):
     """
     if isinstance(params, dict):
         params = set_params(**params)
+    if isinstance(params.DarkEnergy, IDEExponential):
+        raise CAMBError("IDEExponential CMB bispectra are not validated")
     from .bispectrum import get_bispectrum as _get_bispectrum
 
     return _get_bispectrum(params, bispectrum_params, output_root=output_root, _debug_params=_debug_params)
@@ -185,6 +188,7 @@ def set_params(cp=None, verbose=False, **params):
     if "ALens" in params:
         raise ValueError("Use Alens not ALens")
 
+    existing_ide = cp is not None and isinstance(cp.DarkEnergy, IDEExponential) and "dark_energy_model" not in params
     if cp is None:
         cp = model.CAMBparams()
     else:
@@ -204,11 +208,44 @@ def set_params(cp=None, verbose=False, **params):
     # set_classes allows redefinition of the classes used, so must be called before setting class parameters
     do_set(cp.set_accuracy)
     do_set(cp.set_classes)
+    ide = isinstance(cp.DarkEnergy, IDEExponential)
+    if ide:
+        forbidden = {"H0", "omch2", "cosmomc_theta", "thetastar", "h"} & params.keys()
+        if forbidden:
+            raise CAMBError(f"IDEExponential derives {', '.join(sorted(forbidden))}; use V0_over_rho100 and omc_early")
     do_set(cp.Recomb.set_params)
-    do_set(cp.DarkEnergy.set_params)
+    if not ide:
+        do_set(cp.DarkEnergy.set_params)
     do_set(cp.Reion.set_extra_params)
-    do_set(cp.set_cosmology)
-    do_set(cp.set_matter_power)
+    if ide:
+        ide_model_keys = set(_get_setter_spec(cp.DarkEnergy.set_params))
+        ide_cosmology_keys = set(_get_setter_spec(cp.set_ide_cosmology))
+        cosmology_updates = set(params) & (ide_cosmology_keys - ide_model_keys)
+        if {"tau", "zrei"} <= cosmology_updates:
+            raise CAMBError("Cannot set both tau and zrei")
+        if existing_ide and cosmology_updates - {"tau", "zrei"}:
+            has_densities = {"ombh2", "nnu"} <= cosmology_updates and bool({"mnu", "omnuh2_active"} & cosmology_updates)
+            if not has_densities:
+                raise CAMBError("Updating IDE physical inputs requires ombh2, nnu, and mnu or omnuh2_active together")
+        if existing_ide and cosmology_updates <= {"tau", "zrei"}:
+            model_updates = set(params) & ide_model_keys
+            if model_updates:
+                current = {key: getattr(cp.DarkEnergy, key) for key in ide_model_keys}
+                current.update({key: params[key] for key in model_updates})
+                cp.DarkEnergy.set_params(**current)
+                used_params.update(model_updates)
+            if "tau" in cosmology_updates:
+                cp.Reion.set_tau(params["tau"])
+            if "zrei" in cosmology_updates:
+                cp.Reion.set_zrei(params["zrei"])
+            used_params.update(cosmology_updates)
+        else:
+            do_set(cp.set_ide_cosmology)
+        if "redshifts" in params or "kmax" in params:
+            raise CAMBError("IDEExponential matter transfers are not validated")
+    else:
+        do_set(cp.set_cosmology)
+        do_set(cp.set_matter_power)
     do_set(cp.set_for_lmax)
     do_set(cp.InitPower.set_params)
     do_set(cp.NonLinearModel.set_params)
@@ -236,6 +273,10 @@ def set_params(cp=None, verbose=False, **params):
                 setattr(obj, par, params[k])
             else:
                 raise CAMBUnknownArgumentError(f"Unrecognized parameter: {k}")
+    if ide:
+        if cp.NonLinear != model.NonLinear_none:
+            raise CAMBError("IDEExponential requires NonLinear_none")
+        cp.DoLateRadTruncation = False
     return cp
 
 
@@ -260,9 +301,14 @@ def get_valid_numerical_params(transfer_only=False, **class_names):
             ) and "version" not in arg:
                 params.add(arg)
 
-    extract_params(cp.DarkEnergy.set_params)
+    ide = isinstance(cp.DarkEnergy, IDEExponential)
+    if ide:
+        extract_params(cp.set_ide_cosmology)
+    else:
+        extract_params(cp.DarkEnergy.set_params)
     extract_params(cp.Reion.set_extra_params)
-    extract_params(cp.set_cosmology)
+    if not ide:
+        extract_params(cp.set_cosmology)
     if not transfer_only:
         extract_params(cp.InitPower.set_params)
         extract_params(cp.NonLinearModel.set_params)
@@ -270,7 +316,7 @@ def get_valid_numerical_params(transfer_only=False, **class_names):
     for f, tp, *_ in cp._fields_:
         if not f.startswith("_") and tp == ctypes.c_double:
             params.add(f)
-    return params - {
+    excluded = {
         "max_eta_k_tensor",
         "max_eta_k",
         "neutrino_hierarchy",
@@ -282,6 +328,9 @@ def get_valid_numerical_params(transfer_only=False, **class_names):
         "num_nu_massless",
         "bbn_predictor",
     }
+    if ide:
+        excluded.update({"H0", "omch2", "omk", "redshifts", "kmax", "cosmomc_theta", "thetastar"})
+    return params - excluded
 
 
 def set_params_cosmomc(

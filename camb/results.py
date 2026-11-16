@@ -25,6 +25,7 @@ from .baseconfig import (
     numpy_1d_int,
     numpy_2d,
 )
+from .dark_energy import IDEExponential
 from .model import CAMBparams, set_default_params
 
 logger = logging.getLogger(__name__)
@@ -244,6 +245,7 @@ class CAMBdata(F2003Class):
         ("DeltaPhysicalTimeGyr", [d_arg, d_arg, d_arg], c_double),
         ("DeltaPhysicalTimeGyrArr", [numpy_1d, numpy_1d, numpy_1d, int_arg, d_arg]),
         ("GetBackgroundDensities", [int_arg, numpy_1d, numpy_2d]),
+        ("GetIDEHistory", [int_arg, numpy_1d, numpy_1d, numpy_1d]),
         ("DeltaTime", [d_arg, d_arg, d_arg], c_double),
         ("DeltaTimeArr", [numpy_1d, numpy_1d, numpy_1d, int_arg, d_arg]),
         ("TimeOfzArr", [numpy_1d, numpy_1d, int_arg, d_arg]),
@@ -278,7 +280,10 @@ class CAMBdata(F2003Class):
                  Definitions of derived parameters follow those in the Planck parameter papers.
                  Note that all `theta__` derived parameters here are scaled by a factor of 100 for historical reasons.
         """
-        return dict(zip(model.derived_names, self.ThermoDerivedParams))
+        derived = dict(zip(model.derived_names, self.ThermoDerivedParams))
+        if isinstance(self.Params.DarkEnergy, IDEExponential):
+            derived.update(H0=self.Params.H0, omch2=self.Params.omch2)
+        return derived
 
     def get_background_outputs(self):
         """
@@ -324,6 +329,11 @@ class CAMBdata(F2003Class):
         :param do_reion: whether to initialize the reionization model
         """
         self._check_params(params)
+        if isinstance(params.DarkEnergy, IDEExponential):
+            if do_reion:
+                raise CAMBError("IDEExponential no-thermo background cannot initialize reionization")
+            if params.NonLinear != model.NonLinear_none:
+                raise CAMBError("IDEExponential nonlinear calculations are not implemented")
         self.f_SetParams(byref(params), None, byref(c_int(1 if do_reion else 0)), None, byref(c_int(1)))
         config.check_global_error("calc_background_no_thermo")
 
@@ -335,6 +345,11 @@ class CAMBdata(F2003Class):
         :param params:  :class:`~.model.CAMBparams` instance to use
         """
         self._check_params(params)
+        if isinstance(params.DarkEnergy, IDEExponential):
+            from .recombination import Recfast
+
+            if not isinstance(params.Recomb, Recfast):
+                raise CAMBError("IDEExponential thermal history requires RECFAST")
         if CAMBdata_CalcBackgroundTheory(byref(self), byref(params)):
             config.check_global_error("calc_background")
 
@@ -350,6 +365,10 @@ class CAMBdata(F2003Class):
         :return: non-zero if error, zero if OK
         """
         self._check_params(params)
+        if isinstance(params.DarkEnergy, IDEExponential):
+            self._validate_ide_cmb_params(params)
+            if only_time_sources:
+                raise CAMBError("IDEExponential nonlinear and time-only transfer outputs are not validated")
         if not (only_transfers or only_time_sources):
             self._check_powers(params)
         if CAMBdata_gettransfers(
@@ -367,6 +386,29 @@ class CAMBdata(F2003Class):
             raise CAMBError("r>0 but params.WantTensors = F")
         if params.WantScalars and params.WantCls and params.DoLensing and params.scalar_power(0.05) > 2e-8:
             raise CAMBError("Lensing requires a realistically normalized spectrum, you have P(k=0.05/Mpc) > 2e-8")
+
+    @staticmethod
+    def _validate_ide_cmb_params(params):
+        from .recombination import Recfast
+
+        if not params.WantCls or not params.WantScalars or not params.Want_CMB:
+            raise CAMBError("IDEExponential requires scalar CMB spectra")
+        if params.WantTensors or params.WantVectors or params.InitPower.has_tensors():
+            raise CAMBError("IDEExponential tensor and vector modes are not implemented")
+        if params.scalar_initial_condition != "initial_adiabatic":
+            raise CAMBError("IDEExponential supports adiabatic scalar initial conditions only")
+        if params.NonLinear != model.NonLinear_none:
+            raise CAMBError("IDEExponential nonlinear corrections are not validated")
+        if params.WantTransfer or len(params.SourceWindows) or params.CustomSources.num_custom_sources:
+            raise CAMBError("IDEExponential matter transfers and source windows are not validated")
+        if params.Do21cm or params.transfer_21cm_cl or params.Evolve_delta_Ts:
+            raise CAMBError("IDEExponential 21 cm calculations are not implemented")
+        if params.Evolve_delta_xe:
+            raise CAMBError("IDEExponential ionization perturbations are not validated")
+        if params.omk != 0 or not isinstance(params.Recomb, Recfast):
+            raise CAMBError("IDEExponential CMB requires flat geometry and RECFAST")
+        if params.DoLateRadTruncation:
+            raise CAMBError("IDEExponential requires DoLateRadTruncation=False")
 
     def calc_power_spectra(self, params=None):
         """
@@ -584,6 +626,10 @@ class CAMBdata(F2003Class):
 
             if unknown := set(named_vars).difference(model.evolve_names):
                 raise CAMBError(f"Unknown names {unknown}; valid names are {model.evolve_names}")
+            if any(var.endswith("_ide") for var in named_vars) and not isinstance(
+                self.Params.DarkEnergy, IDEExponential
+            ):
+                raise CAMBError("IDE mode evolution variables require IDEExponential")
 
             num_standard_names = len(model.evolve_names)
 
@@ -599,6 +645,8 @@ class CAMBdata(F2003Class):
                     raise CAMBError(
                         "Variables must be variable names, or a sympy expression (using camb.symbolic variables)"
                     )
+            if custom_vars and isinstance(self.Params.DarkEnergy, IDEExponential):
+                raise CAMBError("IDEExponential symbolic frame sources have not been validated for moving CDM")
 
             if np.isscalar(q):
                 k = np.array([q], dtype=np.float64)
@@ -720,6 +768,29 @@ class CAMBdata(F2003Class):
             assert format == "array", "format must be dict or array"
             return outputs[:, np.array(indices)]
 
+    def get_ide_history(self, a):
+        r"""Return the IDE scalar field and CDM density at requested scale factors.
+
+        ``rho_c_over_rho100`` is the physical CDM density in units of
+        :math:`\rho_{\mathrm{crit},100}`, not CAMB's :math:`8\pi G a^4\rho_c`.
+        Values below ``a_init`` use the frozen-field continuation. The result
+        is a dictionary of one-dimensional NumPy arrays named ``a``, ``phi``,
+        and ``rho_c_over_rho100``.
+        """
+        if not isinstance(self.Params.DarkEnergy, IDEExponential):
+            raise CAMBError("get_ide_history requires an initialized IDEExponential background")
+        scales = np.atleast_1d(np.asarray(a, dtype=np.float64))
+        if scales.ndim != 1 or not np.all(np.isfinite(scales)) or np.any((scales <= 0) | (scales > 1)):
+            raise CAMBValueError("IDE history scale factors must be finite and in 0 < a <= 1")
+        scales = np.ascontiguousarray(scales)
+        phi = np.empty_like(scales)
+        rho = np.empty_like(scales)
+        self.f_GetIDEHistory(byref(c_int(scales.size)), scales, phi, rho)
+        config.check_global_error("get_ide_history")
+        if not np.all(np.isfinite(phi)) or not np.all(np.isfinite(rho)) or np.any(rho <= 0):
+            raise CAMBValueError("IDE history is outside the finite positive density range")
+        return {"a": scales, "phi": phi, "rho_c_over_rho100": rho}
+
     @overload
     def get_dark_energy_rho_w(self, a: float) -> tuple[float, float]: ...
 
@@ -770,6 +841,8 @@ class CAMBdata(F2003Class):
 
         :return: :class:`.MatterTransferData` instance holding output arrays (copies, not pointers)
         """
+        if isinstance(self.Params.DarkEnergy, IDEExponential):
+            raise CAMBError("IDEExponential matter transfers are not validated")
         if not self.Params.WantTransfer:
             raise CAMBError("must have Params.WantTransfer to get matter transfers and power")
 
@@ -831,6 +904,8 @@ class CAMBdata(F2003Class):
         :return: k/h or k, z, PK, where kz and z are arrays of k/h or k and z respectively,
                  and PK[i,j] is the value at z[i], k[j]/h or k[j]
         """
+        if isinstance((params or self.Params).DarkEnergy, IDEExponential):
+            raise CAMBError("IDEExponential matter power is not validated")
         if self.OnlyTransfers or params is not None or not have_power_spectra:
             self.calc_power_spectra(params)
 
@@ -927,6 +1002,8 @@ class CAMBdata(F2003Class):
                            (where R always Mpc units not h^{-1}Mpc and R, z are arrays)
         :return: array of :math:`\sigma_R` values, or 2D array indexed by (redshift, R)
         """
+        if isinstance(self.Params.DarkEnergy, IDEExponential):
+            raise CAMBError("IDEExponential sigmaR is not validated")
         assert self.Params.WantTransfer
         var1, var2 = self._transfer_var(var1, var2)
         if hubble_units:
@@ -968,6 +1045,8 @@ class CAMBdata(F2003Class):
 
         :return: array of :math:`\sigma_8` values, in order of increasing time (decreasing redshift)
         """
+        if isinstance(self.Params.DarkEnergy, IDEExponential):
+            raise CAMBError("IDEExponential sigma8 is not validated")
         assert self.Params.WantTransfer
         sigma8 = np.empty(self.Params.Transfer.PK_num_redshifts, dtype=np.float64)
         CAMBdata_GetSigma8(byref(self), sigma8, byref(c_int(0)))
@@ -992,6 +1071,8 @@ class CAMBdata(F2003Class):
 
         :return: array of f*sigma_8 values, in order of increasing time (decreasing redshift)
         """
+        if isinstance(self.Params.DarkEnergy, IDEExponential):
+            raise CAMBError("IDEExponential fsigma8 is not validated")
         assert self.Params.WantTransfer
         fsigma8 = np.empty(self.Params.Transfer.PK_num_redshifts, dtype=np.float64)
         CAMBdata_GetSigma8(byref(self), fsigma8, byref(c_int(1)))
@@ -1017,6 +1098,8 @@ class CAMBdata(F2003Class):
         :return: kh, z, PK, where kz and z are arrays of k/h and z respectively, and PK[i,j] is value at z[i], k/h[j]
         """
 
+        if isinstance((params or self.Params).DarkEnergy, IDEExponential):
+            raise CAMBError("IDEExponential matter power is not validated")
         if not have_power_spectra:
             self.calc_power_spectra(params)
 
@@ -1092,6 +1175,9 @@ class CAMBdata(F2003Class):
                  that can be called with PK.P(z,kh) or PK(z,log(kh)) to get log matter power values.
                  If return_z_k=True, instead return interpolator, z, k where z, k are the grid used.
         """
+
+        if isinstance(self.Params.DarkEnergy, IDEExponential):
+            raise CAMBError("IDEExponential matter power is not validated")
 
         class PKInterpolator(RectBivariateSpline):
             islog: bool
@@ -1841,6 +1927,8 @@ class CAMBdata(F2003Class):
 
         :return: :math:`\theta_{\rm MC}`
         """
+        if isinstance(self.Params.DarkEnergy, IDEExponential):
+            raise CAMBError("CosmoMC theta approximation is not valid for IDEExponential")
         return self.f_CosmomcTheta()
 
 

@@ -178,7 +178,7 @@
 
     end function get_effective_null
 
-    function CAMB_GetPhiOlver(l, K, nu, chi) result(phi) bind(C, name="camb_getphiolver")
+    function CAMB_GetPhiOlver(l, K, nu, chi) result(phi) bind(c, name="camb_getphiolver")
     integer(c_int), value :: l, K
     real(c_double), value :: nu, chi
     real(c_double) :: phi
@@ -187,7 +187,7 @@
 
     end function CAMB_GetPhiOlver
 
-    subroutine CAMB_GetPhiOlverArray(phi, l, K, nu, chi, n) bind(C, name="camb_getphiolverarray")
+    subroutine CAMB_GetPhiOlverArray(phi, l, K, nu, chi, n) bind(c, name="camb_getphiolverarray")
     integer(c_int), value :: l, K, n
     real(c_double), value :: nu
     real(c_double), intent(out) :: phi(*)
@@ -208,7 +208,7 @@
 
     end subroutine CAMB_GetPhiOlverArray
 
-    function CAMB_GetPhiRecurs(l, K, nu, chi) result(phi) bind(C, name="camb_getphirecurs")
+    function CAMB_GetPhiRecurs(l, K, nu, chi) result(phi) bind(c, name="camb_getphirecurs")
     integer(c_int), value :: l, K
     real(c_double), value :: nu, chi
     real(c_double) :: phi
@@ -217,7 +217,7 @@
 
     end function CAMB_GetPhiRecurs
 
-    subroutine CAMB_GetPhiRecursArray(phi, l, K, nu, chi, n) bind(C, name="camb_getphirecursarray")
+    subroutine CAMB_GetPhiRecursArray(phi, l, K, nu, chi, n) bind(c, name="camb_getphirecursarray")
     integer(c_int), value :: l, K, n
     real(c_double), value :: nu
     real(c_double), intent(out) :: phi(*)
@@ -238,7 +238,7 @@
 
     end subroutine CAMB_GetPhiRecursArray
 
-    function CAMB_GetPhiDerivative(l, K, nu, chi) result(dphi) bind(C, name="camb_getphiderivative")
+    function CAMB_GetPhiDerivative(l, K, nu, chi) result(dphi) bind(c, name="camb_getphiderivative")
     integer(c_int), value :: l, K
     real(c_double), value :: nu, chi
     real(c_double) :: dphi
@@ -247,7 +247,7 @@
 
     end function CAMB_GetPhiDerivative
 
-    function CAMB_GetPhiFirstPeakChi(l, K, nu) result(chi) bind(C, name="camb_getphifirstpeakchi")
+    function CAMB_GetPhiFirstPeakChi(l, K, nu) result(chi) bind(c, name="camb_getphifirstpeakchi")
     integer(c_int), value :: l, K
     real(c_double), value :: nu
     real(c_double) :: chi
@@ -257,7 +257,7 @@
     end function CAMB_GetPhiFirstPeakChi
 
     function CAMB_GetPhiFirstPeakNoPeakFound(l, K, nu) result(no_peak) &
-        bind(C, name="camb_getphifirstpeaknopeakfound")
+        bind(c, name="camb_getphifirstpeaknopeakfound")
     integer(c_int), value :: l, K
     real(c_double), value :: nu
     integer(c_int) :: no_peak
@@ -269,7 +269,7 @@
 
     end function CAMB_GetPhiFirstPeakNoPeakFound
 
-    function CAMB_GetPhiFirstPeakAmplitude(l, K, nu) result(peak) bind(C, name="camb_getphifirstpeakamplitude")
+    function CAMB_GetPhiFirstPeakAmplitude(l, K, nu) result(peak) bind(c, name="camb_getphifirstpeakamplitude")
     integer(c_int), value :: l, K
     real(c_double), value :: nu
     real(c_double) :: peak
@@ -697,10 +697,12 @@
     real(dl), intent(out) :: outputs(:, :, :)
     integer, intent(in) :: nsources, ncustomsources
     real(dl) tau, tol1, tauend, taustart
-    integer j, ind
+    integer j, ind, ide_diag_start, custom_start
+    logical have_ide_diagnostics
     type(RungeKuttaDP45Settings) :: rk_settings
     real(dl) w(EV%nvar, 9), y(EV%nvar), cs2, opacity
-    real(dl) yprime(EV%nvar), ddelta, delta, adotoa, growth, a
+    real(dl) yprime(EV%nvar), ddelta, delta, adotoa, growth, a, grhoc_weight
+    real(dl) phi_background, phidot_background
     real(dl), target :: sources(nsources), custom_sources(ncustomsources)
     real, target :: Arr(Transfer_max)
     procedure(state_function) :: dtauda
@@ -708,7 +710,9 @@
     w = 0
     y = 0
     taustart = GetTauStart(min(500._dl, EV%q))
+    if (global_error_flag /= 0) return
     call initial(EV, y, taustart)
+    if (global_error_flag /= 0) return
 
     tau = taustart
     ind = 1
@@ -730,8 +734,14 @@
         outputs(Transfer_max + 1, j, EV%q_ix) = a
         outputs(Transfer_max + 2, j, EV%q_ix) = y(ix_etak) ! etak
         adotoa = 1/(a*dtauda(Data, a))
-        ddelta = (yprime(ix_clxc)*Data%grhoc + yprime(ix_clxb)*Data%grhob)/(Data%grhob + Data%grhoc)
-        delta = (Data%grhoc*y(ix_clxc) + Data%grhob*y(ix_clxb))/(Data%grhob + Data%grhoc)
+        grhoc_weight = Data%CP%DarkEnergy%CDMGrhoa4(a, Data%grhoc)/a
+        ddelta = (yprime(ix_clxc)*grhoc_weight + yprime(ix_clxb)*Data%grhob)/(Data%grhob + grhoc_weight)
+        delta = (grhoc_weight*y(ix_clxc) + Data%grhob*y(ix_clxb))/(Data%grhob + grhoc_weight)
+        if (EV%is_ide) then
+            call Data%CP%DarkEnergy%ScalarBackgroundAtA(a, phi_background, phidot_background, adotoa)
+            ddelta = ddelta - Data%CP%DarkEnergy%CouplingBeta()*phidot_background &
+                *grhoc_weight/(Data%grhob + grhoc_weight)*(y(ix_clxc) - delta)
+        end if
         growth = ddelta/delta/adotoa
         outputs(Transfer_max + 3, j, EV%q_ix) = adotoa ! hubble
         outputs(Transfer_max + 4, j, EV%q_ix) = growth
@@ -749,9 +759,23 @@
             outputs(Transfer_max + 8, j, EV%q_ix) = y(EV%r_ix + 1) ! v_r
         end if
         outputs(Transfer_max + 9:Transfer_max + 9 + nsources - 1, j, EV%q_ix) = sources
+        ide_diag_start = Transfer_max + 9 + nsources
+        have_ide_diagnostics = size(outputs, 1) - ncustomsources >= ide_diag_start + 6
+        custom_start = ide_diag_start
+        if (have_ide_diagnostics) then
+            custom_start = ide_diag_start + 7
+            if (EV%is_ide) then
+                outputs(ide_diag_start, j, EV%q_ix) = y(EV%w_ix)
+                outputs(ide_diag_start + 1, j, EV%q_ix) = y(EV%w_ix + 1)
+                outputs(ide_diag_start + 2, j, EV%q_ix) = y(ix_vc)
+                outputs(ide_diag_start + 3, j, EV%q_ix) = EV%diagnostic_z
+                outputs(ide_diag_start + 4, j, EV%q_ix) = EV%diagnostic_dgq
+                outputs(ide_diag_start + 5, j, EV%q_ix) = EV%diagnostic_dgrho
+                outputs(ide_diag_start + 6, j, EV%q_ix) = EV%diagnostic_sigma
+            end if
+        end if
         if (ncustomsources > 0) then
-            outputs(Transfer_max + 9 + nsources: &
-                Transfer_max + 9 + nsources + ncustomsources - 1, j, EV%q_ix) = custom_sources
+            outputs(custom_start:custom_start + ncustomsources - 1, j, EV%q_ix) = custom_sources
         end if
 
         if (global_error_flag /= 0) return
@@ -784,6 +808,10 @@
     global_error_flag = 0
     outputs = 0
     taustart = min(times(1), GetTauStart(maxval(q)))
+    if (global_error_flag /= 0) then
+        err = global_error_flag
+        return
+    end if
     if (.not. this%ThermoData%HasThermoData .or. taustart < this%ThermoData%tauminn) &
         call this%ThermoData%Init(this, taustart)
     !$OMP PARALLEL DO DEFAULT(SHARED), SCHEDULE(DYNAMIC), PRIVATE(EV, q_ix)
@@ -795,7 +823,7 @@
             EV%q2 = EV%q**2
             EV%ThermoData => this%ThermoData
             call GetNumEqns(EV)
-            call GetOutputEvolutionFork(State, EV, times, outputs, 3, ncustomsources)
+            if (global_error_flag == 0) call GetOutputEvolutionFork(State, EV, times, outputs, 3, ncustomsources)
         end if
     end do
     !$OMP END PARALLEL DO

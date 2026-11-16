@@ -6,7 +6,7 @@ POWERSPECTRUM_FILES ?= InitialPower
 REIONIZATION_FILES ?= reionization
 RECOMBINATION_FILES ?= recfast
 NONLINEAR_FILES     ?= halofit SPkNonLinear SecondOrderPK ExternalNonLinearRatio
-DARKENERGY_FILES  ?= DarkEnergyFluid DarkEnergyPPF PowellMinimize DarkEnergyQuintessence
+DARKENERGY_FILES  ?= DarkEnergyFluid DarkEnergyPPF PowellMinimize DarkEnergyQuintessence DarkEnergyIDEExponential
 
 BISPECTRUM ?= SeparableBispectrum
 
@@ -121,7 +121,8 @@ libcamb: libforutils directories
 python: libforutils_so directories_so
 	$(call run_build_submake,$(DLL_LIBRARY_DEPFILES),$(DLL_DIR),camblib.so F90FLAGS="$(SF90FLAGS)" OUTPUT_DIR=$(DLL_DIR))
 	@mkdir -p $(PYCAMB_OUTPUT_DIR)
-	cp $(DLL_DIR)/camblib.so $(PYCAMB_OUTPUT_DIR)
+	cp $(DLL_DIR)/camblib.so $(PYCAMB_OUTPUT_DIR)/camblib.so.new
+	mv -f $(PYCAMB_OUTPUT_DIR)/camblib.so.new $(PYCAMB_OUTPUT_DIR)/camblib.so
 
 $(SOURCE_DIR)/camb: $(CAMBLIB) $(DRIVER).o | silent
 	+@$(MAKE) -C $(SOURCE_DIR) $(MAKEOPT) -f Makefile_main camb_exe

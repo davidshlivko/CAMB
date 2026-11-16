@@ -94,6 +94,7 @@
     real(dl), parameter :: NEARFLAT_TOL = 1e-3_dl ! determines whether near-flat approximations used
 
     real(dl) :: dtaurec_q
+    real(dl) :: ide_tau_start = 0._dl
 
     ! qmax - CP%Max_eta_k/State%tau0, qmin = qmin0/State%tau0 for flat case
     real(dl) qmin, qmax
@@ -707,6 +708,16 @@
     real(dl), intent(in) :: q
     real(dl) taustart, GetTauStart
 
+    if (ide_tau_start > 0._dl) then
+        ! The field is specified on a single initial hypersurface. All IDE modes must
+        ! begin there, while their wavelengths are still safely outside the horizon.
+        if (q*ide_tau_start > 1e-3_dl) &
+            call GlobalError('IDE initial scale factor is too late for the requested CMB modes', &
+            error_unsupported_params)
+        GetTauStart = ide_tau_start
+        return
+    end if
+
     !     Begin when wave is far outside horizon.
     !     Conformal time (in Mpc) in the radiation era, for photons plus 3 species
     !     of relativistic neutrinos.
@@ -789,6 +800,17 @@
 
     call SetActiveState(ActiveState)
 
+    ide_tau_start = 0._dl
+    if (CP%DarkEnergy%InitialScaleFactor() > 0._dl) then
+        ide_tau_start = State%TimeOfz(1._dl/CP%DarkEnergy%InitialScaleFactor() - 1._dl)
+        if (ide_tau_start <= 0._dl .or. global_error_flag /= 0) then
+            if (global_error_flag == 0) &
+                call GlobalError('IDE initial scale factor produced an invalid conformal time', &
+                error_unsupported_params)
+            return
+        end if
+    end if
+
     initAccuracyBoost = CP%Accuracy%AccuracyBoost*CP%Accuracy%TimeStepBoost
 
     ! Maximum and minimum k-values.
@@ -826,6 +848,7 @@
     end if
 
     taumin = GetTauStart(maxq)
+    if (global_error_flag /= 0) return
 
     !     Initialize baryon temperature and ionization fractions vs. time.
     !     This subroutine also fixes the timesteps where the sources are

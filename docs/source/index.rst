@@ -73,6 +73,7 @@ Other modules:
 
    bbn
    dark_energy
+   ide_background
    initialpower
    nonlinear
    spk

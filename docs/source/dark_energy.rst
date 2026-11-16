@@ -24,6 +24,10 @@ Dark Energy models
    :show-inheritance:
    :members:
 
+.. autoclass:: camb.dark_energy.IDEExponential
+   :show-inheritance:
+   :members:
+
 .. autoclass:: camb.dark_energy.AxionEffectiveFluid
    :show-inheritance:
    :members:

@@ -268,6 +268,7 @@
     procedure :: ComovingRadialDistance => CAMBdata_ComovingRadialDistance
     procedure :: ComovingRadialDistanceArr => CAMBdata_ComovingRadialDistanceArr
     procedure :: GetBackgroundDensities => CAMBdata_GetBackgroundDensities
+    procedure :: GetIDEHistory => CAMBdata_GetIDEHistory
     procedure :: Hofz => CAMBdata_Hofz
     procedure :: HofzArr => CAMBdata_HofzArr
     procedure :: sound_horizon => CAMBdata_sound_horizon
@@ -332,6 +333,7 @@
     subroutine CAMBdata_SetParams(this, P, error, DoReion, call_again, background_only)
     ! Initialize background variables; does not yet calculate thermal history
     use constants
+    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
     class(CAMBdata), target :: this
     type(CAMBParams), intent(in) :: P
     real(dl) fractional_number, conv
@@ -341,6 +343,8 @@
     logical WantReion, calling_again
     integer nu_i, actual_massless
     real(dl) nu_massless_degeneracy, neff_i, eta_k, h2, nu_perturb_accuracy, max_nu_mass
+    real(dl) grho100, resolved_h0, resolved_omch2, radiation_eq, eq_low, eq_high, eq_mid, eq_a
+    integer eq_iter
     real(dl), parameter :: massive_nu_transfer_q_boost_mass = 600._dl
     real(dl), parameter :: massive_nu_transfer_q_5point_mass = 4300._dl
     real(dl) zpeak, sigma_z, zpeakstart, zpeakend
@@ -390,6 +394,34 @@
     end if
     if (this%CP%WantTransfer .and. this%CP%MassiveNuMethod == Nu_approx) then
         this%CP%MassiveNuMethod = Nu_trunc
+    end if
+
+    if (this%CP%DarkEnergy%RequiresResolution() .and. .not. back_only) then
+        if (this%CP%omk /= 0._dl) &
+            call GlobalError('IDE CMB requires exactly flat geometry (omk=0)', error_unsupported_params)
+        if (.not. this%CP%WantScalars .or. this%CP%WantTensors .or. this%CP%WantVectors) &
+            call GlobalError('IDE CMB supports scalar modes only', error_unsupported_params)
+        if (this%CP%Scalar_initial_condition /= 1) &
+            call GlobalError('IDE CMB supports adiabatic initial conditions only', error_unsupported_params)
+        if (this%CP%NonLinear /= NonLinear_none) &
+            call GlobalError('IDE CMB requires NonLinear_none', error_unsupported_params)
+        if (this%CP%WantTransfer) &
+            call GlobalError('IDE matter transfer outputs are not validated', error_unsupported_params)
+        if (this%CP%Do21cm .or. this%CP%transfer_21cm_cl .or. this%CP%Evolve_delta_Ts) &
+            call GlobalError('IDE 21cm calculations are not validated', error_unsupported_params)
+        if (this%CP%Evolve_delta_xe) &
+            call GlobalError('IDE ionization perturbations are not validated', error_unsupported_params)
+        if (this%CP%CustomSources%num_custom_sources /= 0) &
+            call GlobalError('IDE custom source functions are not validated', error_unsupported_params)
+        if (allocated(this%CP%SourceWindows)) then
+            if (size(this%CP%SourceWindows) /= 0) &
+                call GlobalError('IDE source windows are not validated', error_unsupported_params)
+        end if
+        if (global_error_flag /= 0) then
+            if (present(error)) error = global_error_flag
+            return
+        end if
+        this%CP%DoLateRadTruncation = .false.
     end if
 
     if (.not. calling_again) then
@@ -443,6 +475,12 @@
         this%flat = (abs(this%CP%omk) <= OmegaKFlat)
         this%closed = this%CP%omk < -OmegaKFlat
 
+        if (this%CP%DarkEnergy%RequiresResolution() .and. this%CP%omk /= 0._dl) then
+            call GlobalError('IDE background requires exactly flat geometry (omk=0)', error_unsupported_params)
+            if (present(error)) error = global_error_flag
+            return
+        end if
+
         if (this%flat) then
             this%curv = 0
             this%Ksign = 0
@@ -461,8 +499,6 @@
 
         ! H0 is in km/s/Mpc
 
-        this%grhocrit = 3*this%CP%H0**2/c**2*1000**2 ! 3*h0^2/c^2 (=8*pi*G*rho_crit/c^2)
-
         this%grhog = kappa/c**2*4*sigma_boltz/c**3*this%CP%TCMB**4*Mpc**2 ! 8*pi*G/c^2*4*sigma_B/c^3 T^4
         ! grhog = 1.4952d-13*tcmb**4
         this%grhor = 7._dl/8*(4._dl/11)**(4._dl/3)*this%grhog ! 7/8*(4/11)^(4/3)*grhog (per neutrino species)
@@ -476,9 +512,52 @@
         do nu_i = 1, this%CP%Nu_mass_eigenstates
             this%grhormass(nu_i) = this%grhor*this%CP%Nu_mass_degeneracies(nu_i)
         end do
+
+        if (this%CP%DarkEnergy%RequiresResolution()) then
+            ! These physical densities do not depend on H0. The forward IDE solve needs
+            ! them before CAMB derives its present-day critical-density quantities.
+            grho100 = 3._dl*(100._dl*1000._dl/c)**2
+            this%grhob = grho100*this%CP%ombh2
+            this%nu_masses = 0._dl
+            if (this%CP%omnuh2 /= 0._dl) then
+                do nu_i = 1, this%CP%Nu_mass_eigenstates
+                    this%nu_masses(nu_i) = ThermalNuBackground%find_nu_mass_for_rho( &
+                        grho100*this%CP%omnuh2*this%CP%Nu_mass_fractions(nu_i)/this%grhormass(nu_i))
+                end do
+                if (all(this%nu_masses(1:this%CP%Nu_mass_eigenstates) == 0._dl)) then
+                    this%CP%omnuh2 = 0._dl
+                    goto 10
+                end if
+                this%nu_masses(1:this%CP%Nu_mass_eigenstates) = &
+                    max(this%nu_masses(1:this%CP%Nu_mass_eigenstates), 1e-3_dl)
+            end if
+            call this%CP%DarkEnergy%ResolveBackground(this, resolved_h0, resolved_omch2)
+            if (global_error_flag /= 0) then
+                if (present(error)) error = global_error_flag
+                return
+            end if
+            if (.not. ieee_is_finite(resolved_h0) .or. .not. ieee_is_finite(resolved_omch2) .or. &
+                resolved_h0 <= 0._dl .or. resolved_omch2 <= 0._dl) then
+                call GlobalError('IDE forward solve returned invalid H0 or omch2', error_darkenergy)
+                if (present(error)) error = global_error_flag
+                return
+            end if
+            this%CP%H0 = resolved_h0
+            this%CP%omch2 = resolved_omch2
+        end if
+
+        this%grhocrit = 3*this%CP%H0**2/c**2*1000**2 ! 3*h0^2/c^2 (=8*pi*G*rho_crit/c^2)
         h2 = (this%CP%H0/100)**2
         this%grhoc = this%grhocrit*this%CP%omch2/h2
         this%grhob = this%grhocrit*this%CP%ombh2/h2
+        if (this%CP%DarkEnergy%RequiresResolution()) then
+            if (abs(this%CP%DarkEnergy%CDMGrhoa4(1._dl, this%grhoc) - this%grhoc) > &
+                1e-8_dl*this%grhocrit) then
+                call GlobalError('IDE CDM density does not close at a=1', error_darkenergy)
+                if (present(error)) error = global_error_flag
+                return
+            end if
+        end if
         this%grhok = this%grhocrit*this%CP%omk
         this%Omega_de = 1 - (this%CP%omch2 + this%CP%ombh2 + this%CP%omnuh2)/h2 - this%CP%omk &
             - (this%grhornomass + this%grhog)/this%grhocrit
@@ -494,8 +573,31 @@
 
         this%fHe = this%CP%Yhe/(mass_ratio_He_H*(1.d0 - this%CP%Yhe)) ! n_He_tot / n_H_tot
 
-        this%z_eq = (this%grhob + this%grhoc) &
-            /(this%grhog + this%grhornomass + sum(this%grhormass(1:this%CP%Nu_mass_eigenstates))) - 1
+        radiation_eq = this%grhog + this%grhornomass + sum(this%grhormass(1:this%CP%Nu_mass_eigenstates))
+        if (this%CP%DarkEnergy%RequiresResolution()) then
+            ! Keep CAMB's z_eq convention of treating every neutrino as massless,
+            ! while using the actual coupled-CDM density at equality.
+            eq_low = 1e-20_dl
+            eq_high = 1._dl
+            if (this%grhob*eq_high + this%CP%DarkEnergy%CDMGrhoa4(eq_high, this%grhoc) <= radiation_eq .or. &
+                this%grhob*eq_low + this%CP%DarkEnergy%CDMGrhoa4(eq_low, this%grhoc) >= radiation_eq) then
+                call GlobalError('IDE matter-radiation equality is not bracketed', error_darkenergy)
+                if (present(error)) error = global_error_flag
+                return
+            end if
+            do eq_iter = 1, 100
+                eq_mid = (eq_low + eq_high)/2._dl
+                if (this%grhob*eq_mid + this%CP%DarkEnergy%CDMGrhoa4(eq_mid, this%grhoc) > radiation_eq) then
+                    eq_high = eq_mid
+                else
+                    eq_low = eq_mid
+                end if
+            end do
+            eq_a = (eq_low + eq_high)/2._dl
+            this%z_eq = 1._dl/eq_a - 1._dl
+        else
+            this%z_eq = (this%grhob + this%grhoc)/radiation_eq - 1._dl
+        end if
 
         if (this%CP%omnuh2 /= 0) then
             ! nu_masses = m_nu(i)*c**2/(k_B*T_nu0)
@@ -605,12 +707,17 @@
         error = 0
     else if (FeedbackLevel > 0 .and. .not. calling_again) then
         write(*, '("Om_b h^2             = ",f9.6)') P%ombh2
-        write(*, '("Om_c h^2             = ",f9.6)') P%omch2
+        write(*, '("Om_c h^2             = ",f9.6)') this%CP%omch2
         write(*, '("Om_nu h^2            = ",f9.6)') P%omnuh2
         write(*, '("Om_darkenergy        = ",f9.6)') this%Omega_de
         write(*, '("Om_K                 = ",f9.6)') P%omk
-        write(*, '("Om_m (inc Om_u)      = ",f9.6)') (P%ombh2 + P%omch2 + P%omnuh2)/h2
-        write(*, '("100 theta (CosmoMC)  = ",f9.6)') 100*this%CosmomcTheta()
+        write(*, '("Om_m (inc Om_u)      = ",f9.6)') &
+            (this%CP%ombh2 + this%CP%omch2 + this%CP%omnuh2)/h2
+        if (this%CP%DarkEnergy%RequiresResolution()) then
+            write(*, '("H0 (derived)        = ",f9.4)') this%CP%H0
+        else
+            write(*, '("100 theta (CosmoMC)  = ",f9.6)') 100*this%CosmomcTheta()
+        end if
         if (this%CP%Num_Nu_massive > 0) then
             write(*, '("N_eff (total)        = ",f9.6)') nu_massless_degeneracy + &
                 sum(this%CP%Nu_mass_degeneracies(1:this%CP%Nu_mass_eigenstates))
@@ -903,16 +1010,21 @@
     real(dl), intent(out) :: arr(n)
     real(dl), intent(in) :: tau(n)
     integer i
-    real(dl) om
+    real(dl) om, grhoc_early, a_init
 
     if (this%ThermoData%ScaleFactorAtTime%n == 0) &
         call GlobalError('RedshiftAtTimeArr: background history not calculated', error_unsupported_params)
     if (global_error_flag /= 0) return
-    !$OMP PARALLEL DO DEFAULT(SHARED), PRIVATE(om, i), IF(n >= redshift_arr_omp_min_n)
+    grhoc_early = this%grhoc
+    if (this%CP%DarkEnergy%RequiresResolution()) then
+        a_init = this%CP%DarkEnergy%InitialScaleFactor()
+        grhoc_early = this%CP%DarkEnergy%CDMGrhoa4(a_init, this%grhoc)/a_init
+    end if
+    om = (this%grhob + grhoc_early)/ &
+        sqrt(3*(this%grhog + sum(this%grhormass(1:this%CP%Nu_mass_eigenstates)) + this%grhornomass))
+    !$OMP PARALLEL DO DEFAULT(SHARED), PRIVATE(i), IF(n >= redshift_arr_omp_min_n)
     do i = 1, n
         if (tau(i) < this%ThermoData%tauminn*1.1) then
-            om = (this%grhob + this%grhoc)/ &
-                sqrt(3*(this%grhog + sum(this%grhormass(1:this%CP%Nu_mass_eigenstates)) + this%grhornomass))
             arr(i) = 1/(this%adotrad*tau(i)*(1 + om*tau(i)/4)) - 1
         else
             arr(i) = 1/this%ThermoData%ScaleFactorAtTime%Value(tau(i)) - 1
@@ -956,6 +1068,12 @@
     real(dl) CAMBdata_CosmomcTheta
     real(dl) ombh2, omdmh2
 
+    if (this%CP%DarkEnergy%RequiresResolution()) then
+        call GlobalError('CosmomcTheta approximation is unavailable for IDE backgrounds', error_unsupported_params)
+        CAMBdata_CosmomcTheta = 0._dl
+        return
+    end if
+
     ombh2 = this%CP%ombh2
     omdmh2 = (this%CP%omch2 + this%CP%omnuh2)
 
@@ -995,7 +1113,7 @@
         end if
 
         densities(2, i) = this%grhok*a**2
-        densities(3, i) = this%grhoc*a
+        densities(3, i) = this%CP%DarkEnergy%CDMGrhoa4(a, this%grhoc)
         densities(4, i) = this%grhob*a
         densities(5, i) = this%grhog
         densities(6, i) = this%grhornomass
@@ -1005,6 +1123,28 @@
     end do
 
     end subroutine CAMBdata_GetBackgroundDensities
+
+    subroutine CAMBdata_GetIDEHistory(this, n, a_arr, phi_arr, rho_arr)
+    ! Return dimensionless phi and rho_c/rho_crit,100 at the supplied scale factors.
+    class(CAMBdata) :: this
+    integer, intent(in) :: n
+    real(dl), intent(in) :: a_arr(n)
+    real(dl), intent(out) :: phi_arr(n), rho_arr(n)
+    integer i
+
+    if (.not. this%CP%DarkEnergy%RequiresResolution()) then
+        call GlobalError('GetIDEHistory requires an IDE dark-energy model', error_unsupported_params)
+        phi_arr = 0._dl
+        rho_arr = 0._dl
+        return
+    end if
+
+    do i = 1, n
+        phi_arr(i) = this%CP%DarkEnergy%PhiAtA(a_arr(i))
+        rho_arr(i) = this%CP%DarkEnergy%RhoCOverRho100(a_arr(i))
+    end do
+
+    end subroutine CAMBdata_GetIDEHistory
 
     integer function CAMBdata_get_lmax_lensed(this)
     class(CAMBdata) :: this
@@ -1185,7 +1325,13 @@
     do i = 1, n
         call this%CP%DarkEnergy%BackgroundDensityAndPressure(1._dl, a(i), grhov_t(i), w(i))
     end do
-    grhov_t = grhov_t/a**2
+    if (this%CP%DarkEnergy%RequiresResolution()) then
+        ! The IDE model returns the absolute scalar density, whereas this
+        ! interface promises the density normalized to its value today.
+        grhov_t = grhov_t/(this%grhov*a**2)
+    else
+        grhov_t = grhov_t/a**2
+    end if
 
     end subroutine CAMBdata_DarkEnergyStressEnergy
 
@@ -1397,7 +1543,8 @@
     real(dl) grhoa2, rhonu
     integer nu_i
 
-    grhoa2 = this%grhok*a**2 + (this%grhoc + this%grhob)*a + this%grhog + this%grhornomass
+    grhoa2 = this%grhok*a**2 + this%CP%DarkEnergy%CDMGrhoa4(a, this%grhoc) &
+        + this%grhob*a + this%grhog + this%grhornomass
 
     if (this%CP%Num_Nu_massive /= 0) then
         ! Get massive neutrino density relative to massless
@@ -1935,10 +2082,10 @@
     real(dl) tau, a, a2
     real(dl) adot, fe, thomc0
     real(dl) dtbdla, vfi, cf1, maxvis, vis, z_scale
-    integer ncount, i, j1, iv, ns
+    integer ncount, i, j1, iv, ns, root_iter
     real(dl), allocatable :: spline_data(:)
     real(dl) last_dotmu, om
-    real(dl) a_verydom
+    real(dl) a_verydom, verydom_threshold, a_lower, a_upper, tau_at_a
     real(dl) awin_lens1p, awin_lens2p, dwing_lens, rs, DA
     real(dl) da_lin ! linear scale factor step used when inverting tau(a)
     real(dl) a_eq, rs_eq, tau_eq, rstar
@@ -2029,9 +2176,30 @@
             end if
         end associate
     end do
-    om = (State%grhob + State%grhoc)/ &
-        sqrt(3*(State%grhog + sum(State%grhormass(1:CP%Nu_mass_eigenstates)) + State%grhornomass))
-    a0 = this%tauminn*State%adotrad*(1 + om*this%tauminn/4)
+    if (CP%DarkEnergy%RequiresResolution()) then
+        ! The analytic radiation/matter inversion uses present-day CDM scaling. Invert the actual IDE tau(a).
+        a0 = this%tauminn*State%adotrad
+        a_lower = 0._dl
+        a_upper = max(a0, 1.e-16_dl)
+        do root_iter = 1, 64
+            if (State%DeltaTime(0._dl, a_upper, 1.e-10_dl) >= this%tauminn) exit
+            a_upper = min(1._dl, 2._dl*a_upper)
+        end do
+        do root_iter = 1, 50
+            a0 = 0.5_dl*(a_lower + a_upper)
+            tau_at_a = State%DeltaTime(0._dl, a0, 1.e-10_dl)
+            if (tau_at_a < this%tauminn) then
+                a_lower = a0
+            else
+                a_upper = a0
+            end if
+            if (abs(tau_at_a - this%tauminn) < 1.e-8_dl*this%tauminn) exit
+        end do
+    else
+        om = (State%grhob + State%grhoc)/ &
+            sqrt(3*(State%grhog + sum(State%grhormass(1:CP%Nu_mass_eigenstates)) + State%grhornomass))
+        a0 = this%tauminn*State%adotrad*(1 + om*this%tauminn/4)
+    end if
     ninverse = nint(background_boost*log(1/a0)/log(1/2d-10)*4000)
     if (.not. CP%DarkEnergy%is_cosmological_constant) ninverse = ninverse*2
 
@@ -2066,8 +2234,10 @@
     last_dotmu = 0
 
     this%matter_verydom_tau = 0
-    a_verydom = CP%Accuracy%AccuracyBoost*CP%Accuracy%TimeSwitchBoost &
-        *5*(State%grhog + State%grhornomass)/(State%grhoc + State%grhob)
+    verydom_threshold = 5._dl*CP%Accuracy%AccuracyBoost*CP%Accuracy%TimeSwitchBoost
+    if (.not. CP%DarkEnergy%RequiresResolution()) then
+        a_verydom = verydom_threshold*(State%grhog + State%grhornomass)/(State%grhoc + State%grhob)
+    end if
     if (CP%Reion%Reionization) then
         call CP%Reion%get_timesteps(State%reion_n_steps, reion_z_start, reion_z_complete)
         State%reion_tau_start = max(0.05_dl, State%TimeOfz(reion_z_start, 1d-3))
@@ -2102,7 +2272,11 @@
     call this%ScaleFactorAtTime%Init(scale_factors, dt)
     call this%ScaleFactorAtTime%IntegralArray(times(2), first_index=2)
     times(1) = this%tauminn
-    times(2:) = times(2:) + 2*(sqrt(1 + om*scale_factors(2)/State%adotrad) - 1)/om
+    if (CP%DarkEnergy%RequiresResolution()) then
+        times(2:) = times(2:) + State%DeltaTime(0._dl, scale_factors(2), 1.e-10_dl)
+    else
+        times(2:) = times(2:) + 2*(sqrt(1 + om*scale_factors(2)/State%adotrad) - 1)/om
+    end if
     times(ninverse + nlin) = State%tau0
     call this%ScaleFactorAtTime%Init(times, scale_factors)
     taus(1) = this%tauminn
@@ -2128,8 +2302,13 @@
         a = this%ScaleFactor(i)
         adot = 1/dtauda(State, a)
         this%adot(i) = adot
-        if (this%matter_verydom_tau == 0 .and. a > a_verydom) then
-            this%matter_verydom_tau = tau
+        if (this%matter_verydom_tau == 0._dl) then
+            if (CP%DarkEnergy%RequiresResolution()) then
+                if (State%grhob*a + CP%DarkEnergy%CDMGrhoa4(a, State%grhoc) > &
+                    verydom_threshold*(State%grhog + State%grhornomass)) this%matter_verydom_tau = tau
+            else if (a > a_verydom) then
+                this%matter_verydom_tau = tau
+            end if
         end if
         z = 1._dl/a - 1._dl
         if (State%num_redshiftwindows > 0) then
@@ -4072,7 +4251,7 @@
             x = kh*R
             where (x < 1e-2_dl)
                 win = 1._dl - x**2/5
-            elsewhere
+            else where
                 win = (3*(sin(x) - x*cos(x))/x**3)**2
             end where
             if (ik == 1 .and. subk == 1) then
