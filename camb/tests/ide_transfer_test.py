@@ -9,7 +9,6 @@ import numpy as np
 import camb
 from camb import model
 
-
 OMB = 0.02237
 OMC_EARLY = 0.12
 MNU = 0.06
@@ -122,7 +121,7 @@ class IDETransferTest(unittest.TestCase):
                 sigma8 = result.get_sigma8()
                 self.assertTrue(np.all(np.isfinite(sigma8)))
                 self.assertTrue(np.all(sigma8 > 0))
-                kh, zs, pk = result.get_linear_matter_power_spectrum()
+                _, _, pk = result.get_linear_matter_power_spectrum()
                 self.assertTrue(np.all(np.isfinite(pk)))
                 self.assertTrue(np.all(pk > 0))
                 np.testing.assert_allclose(result.get_sigma8_0(), result.get_sigmaR(8)[-1], rtol=5e-3)
