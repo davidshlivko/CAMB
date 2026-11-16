@@ -405,8 +405,6 @@
             call GlobalError('IDE CMB supports adiabatic initial conditions only', error_unsupported_params)
         if (this%CP%NonLinear /= NonLinear_none) &
             call GlobalError('IDE CMB requires NonLinear_none', error_unsupported_params)
-        if (this%CP%WantTransfer) &
-            call GlobalError('IDE matter transfer outputs are not validated', error_unsupported_params)
         if (this%CP%Do21cm .or. this%CP%transfer_21cm_cl .or. this%CP%Evolve_delta_Ts) &
             call GlobalError('IDE 21cm calculations are not validated', error_unsupported_params)
         if (this%CP%Evolve_delta_xe) &

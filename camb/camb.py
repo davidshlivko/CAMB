@@ -241,8 +241,7 @@ def set_params(cp=None, verbose=False, **params):
             used_params.update(cosmology_updates)
         else:
             do_set(cp.set_ide_cosmology)
-        if "redshifts" in params or "kmax" in params:
-            raise CAMBError("IDEExponential matter transfers are not validated")
+        do_set(cp.set_matter_power)
     else:
         do_set(cp.set_cosmology)
         do_set(cp.set_matter_power)

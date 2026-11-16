@@ -874,6 +874,9 @@ class CAMBparams(F2003Class):
         Adiabatic scalar CMB calculations with linear lensing are supported. The
         ``mnu`` and neutrino options have the same meaning as in :meth:`set_cosmology`.
         """
+        # Cobaya reuses a base CAMBparams object when varying physical IDE inputs.
+        # Keep its requested linear matter-transfer calculation across the reset.
+        keep_transfer = isinstance(self.DarkEnergy, IDEExponential) and self.WantTransfer
         self._set_physical_cosmology(
             ombh2=ombh2,
             omch2=np.nan,
@@ -901,7 +904,7 @@ class CAMBparams(F2003Class):
             history_points=history_points,
         )
         self.WantCls = True
-        self.WantTransfer = False
+        self.WantTransfer = keep_transfer
         self.DoLateRadTruncation = False
         self.NonLinear = NonLinear_none
         if tau is not None:

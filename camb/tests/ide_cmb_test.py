@@ -232,7 +232,6 @@ class IDECMBTest(unittest.TestCase):
             ("tensor", lambda p: setattr(p, "WantTensors", True), "tensor"),
             ("isocurvature", lambda p: setattr(p, "scalar_initial_condition", "initial_iso_CDM"), "adiabatic"),
             ("nonlinear", lambda p: setattr(p, "NonLinear", model.NonLinear_lens), "nonlinear"),
-            ("transfer", lambda p: setattr(p, "WantTransfer", True), "transfer"),
             ("21cm", lambda p: setattr(p, "Do21cm", True), "21 cm"),
             ("ionization perturbations", lambda p: setattr(p, "Evolve_delta_xe", True), "ionization"),
             ("late truncation", lambda p: setattr(p, "DoLateRadTruncation", True), "DoLateRadTruncation"),
@@ -242,9 +241,9 @@ class IDECMBTest(unittest.TestCase):
                 mutate(pars)
                 with self.assertRaisesRegex(CAMBError, error):
                     camb.get_results(pars)
-        with self.assertRaisesRegex(CAMBError, "matter power"):
-            self.coupled.get_matter_power_spectrum()
-        with self.assertRaisesRegex(CAMBError, "matter transfers"):
+        with self.assertRaisesRegex(CAMBError, "nonlinear matter power"):
+            self.coupled.get_nonlinear_matter_power_spectrum()
+        with self.assertRaisesRegex(CAMBError, "WantTransfer"):
             self.coupled.get_matter_transfer_data()
 
     def test_late_initial_epoch_is_rejected_before_mode_evolution(self):

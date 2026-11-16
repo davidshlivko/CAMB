@@ -281,7 +281,7 @@ class IDEExponential(DarkEnergyModel):
     :math:`m_c=m_{c,\mathrm{early}}e^{-\beta\varphi}`. Baryons are uncoupled.
     Set it through :meth:`camb.model.CAMBparams.set_ide_cosmology`. Background
     and adiabatic scalar CMB calculations with RECFAST and linear lensing are
-    supported.
+    supported, as are linear matter transfers and :math:`\sigma_8`.
     """
 
     _fortran_class_module_ = "DarkEnergyIDEExponential"

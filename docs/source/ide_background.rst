@@ -58,9 +58,14 @@ Its units are CAMB's :math:`8\pi G\rho_c a^4/c^2` in :math:`\mathrm{Mpc}^{-2}`;
 Expansion, time, and distance methods are available. ``get_background(pars)``
 also computes the RECFAST thermal and reionization history. For adiabatic
 scalar modes, ``get_results(pars)`` computes unlensed and linearly lensed CMB
-spectra, and ``get_transfer_functions(pars)`` provides the intermediate CMB
-transfer functions used by Cobaya. Set ``WantTransfer=False``; IDE matter
-power, nonlinear corrections, source windows, tensors, vectors, isocurvature,
+spectra, and ``get_transfer_functions(pars)`` provides intermediate CMB and
+linear matter transfer functions used by Cobaya. For linear matter power and
+:math:`\sigma_8`, call ``pars.set_matter_power(redshifts=[0], kmax=5, nonlinear=False)``
+before ``get_results``. The default ``Transfer_tot`` includes
+CDM, baryons, and massive neutrinos with their IDE background weights. Because
+CDM moves in the IDE synchronous gauge, these transfer densities use that gauge
+convention; their interpretation on very large scales needs care. Nonlinear
+corrections, :math:`f\sigma_8`, source windows, tensors, vectors, isocurvature,
 21 cm, and the approximate CosmoMC theta are not validated. The result's
 ``get_derived_params()`` includes the resolved ``H0`` and ``omch2``.
 
@@ -89,6 +94,10 @@ For example, a linear lensed CMB calculation can be configured through
    results = camb.get_results(pars)
    cls = results.get_cmb_power_spectra(lmax=2500, CMB_unit="muK")
    print(results.get_derived_params()["H0"])
+
+For a Cobaya run, add ``sigma8: {derived: true}`` to ``params``. This requests
+linear matter transfers at :math:`z=0`; keep ``lens_potential_accuracy=0`` and
+do not request nonlinear corrections.
 
 The numerical settings must be checked for convergence at each coupled point
 before interpreting a likelihood or chain. The pilot validation record is in

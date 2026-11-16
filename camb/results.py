@@ -399,8 +399,8 @@ class CAMBdata(F2003Class):
             raise CAMBError("IDEExponential supports adiabatic scalar initial conditions only")
         if params.NonLinear != model.NonLinear_none:
             raise CAMBError("IDEExponential nonlinear corrections are not validated")
-        if params.WantTransfer or len(params.SourceWindows) or params.CustomSources.num_custom_sources:
-            raise CAMBError("IDEExponential matter transfers and source windows are not validated")
+        if len(params.SourceWindows) or params.CustomSources.num_custom_sources:
+            raise CAMBError("IDEExponential source windows and custom sources are not validated")
         if params.Do21cm or params.transfer_21cm_cl or params.Evolve_delta_Ts:
             raise CAMBError("IDEExponential 21 cm calculations are not implemented")
         if params.Evolve_delta_xe:
@@ -841,8 +841,6 @@ class CAMBdata(F2003Class):
 
         :return: :class:`.MatterTransferData` instance holding output arrays (copies, not pointers)
         """
-        if isinstance(self.Params.DarkEnergy, IDEExponential):
-            raise CAMBError("IDEExponential matter transfers are not validated")
         if not self.Params.WantTransfer:
             raise CAMBError("must have Params.WantTransfer to get matter transfers and power")
 
@@ -904,8 +902,8 @@ class CAMBdata(F2003Class):
         :return: k/h or k, z, PK, where kz and z are arrays of k/h or k and z respectively,
                  and PK[i,j] is the value at z[i], k[j]/h or k[j]
         """
-        if isinstance((params or self.Params).DarkEnergy, IDEExponential):
-            raise CAMBError("IDEExponential matter power is not validated")
+        if nonlinear and isinstance((params or self.Params).DarkEnergy, IDEExponential):
+            raise CAMBError("IDEExponential nonlinear matter power is not validated")
         if self.OnlyTransfers or params is not None or not have_power_spectra:
             self.calc_power_spectra(params)
 
@@ -1002,8 +1000,6 @@ class CAMBdata(F2003Class):
                            (where R always Mpc units not h^{-1}Mpc and R, z are arrays)
         :return: array of :math:`\sigma_R` values, or 2D array indexed by (redshift, R)
         """
-        if isinstance(self.Params.DarkEnergy, IDEExponential):
-            raise CAMBError("IDEExponential sigmaR is not validated")
         assert self.Params.WantTransfer
         var1, var2 = self._transfer_var(var1, var2)
         if hubble_units:
@@ -1045,8 +1041,6 @@ class CAMBdata(F2003Class):
 
         :return: array of :math:`\sigma_8` values, in order of increasing time (decreasing redshift)
         """
-        if isinstance(self.Params.DarkEnergy, IDEExponential):
-            raise CAMBError("IDEExponential sigma8 is not validated")
         assert self.Params.WantTransfer
         sigma8 = np.empty(self.Params.Transfer.PK_num_redshifts, dtype=np.float64)
         CAMBdata_GetSigma8(byref(self), sigma8, byref(c_int(0)))
@@ -1098,8 +1092,11 @@ class CAMBdata(F2003Class):
         :return: kh, z, PK, where kz and z are arrays of k/h and z respectively, and PK[i,j] is value at z[i], k/h[j]
         """
 
-        if isinstance((params or self.Params).DarkEnergy, IDEExponential):
-            raise CAMBError("IDEExponential matter power is not validated")
+        if (
+            isinstance((params or self.Params).DarkEnergy, IDEExponential)
+            and (params or self.Params).NonLinear != model.NonLinear_none
+        ):
+            raise CAMBError("IDEExponential nonlinear matter power is not validated")
         if not have_power_spectra:
             self.calc_power_spectra(params)
 
@@ -1176,8 +1173,8 @@ class CAMBdata(F2003Class):
                  If return_z_k=True, instead return interpolator, z, k where z, k are the grid used.
         """
 
-        if isinstance(self.Params.DarkEnergy, IDEExponential):
-            raise CAMBError("IDEExponential matter power is not validated")
+        if nonlinear and isinstance(self.Params.DarkEnergy, IDEExponential):
+            raise CAMBError("IDEExponential nonlinear matter power is not validated")
 
         class PKInterpolator(RectBivariateSpline):
             islog: bool
